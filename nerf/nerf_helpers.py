@@ -8,9 +8,10 @@ import numpy as np
 img2mse = lambda x, y : torch.mean((x - y) ** 2)
 
 # Peak Signal-to-Noise Ratio
-# Convert MSE to PSNR (assumes max pixel value = 1): PSNR = -10 * log10(MSE)
-# Using torch.log10 avoids creating a CPU tensor constant and prevents device mismatches.
-mse2psnr = lambda x : -10. * torch.log10(x)
+# Convert MSE to PSNR. Ensure constants live on the same device as inputs to avoid CPU/GPU mismatches.
+def mse2psnr(x: torch.Tensor) -> torch.Tensor:
+	log10_const = torch.tensor(10.0, device=x.device, dtype=x.dtype)
+	return -10.0 * torch.log(x) / torch.log(log10_const)
 
 # Conversion to 8 bit format
 # This converts floating poitn image data in the (0-1) range to 8bit integer format 0-255 for saving displaying images
@@ -58,14 +59,16 @@ def get_rays(H, W, K, c2w):
     """
     # Video Reference i used to learn this: https://www.youtube.com/watch?v=Hz8kz5aeQ44
 
-    # Create a grid of pixel indices:
-    #   i indexes the x (column) coordinate in [0, W-1] holding column indices from 0 to W - 1
-    #   j indexes the y (row) coordinate in [0, H-1] holding row indices from 0 to H - 1
+    # Create a grid of pixel indices on the same device/dtype as c2w to avoid device mismatches
+    device = c2w.device
+    dtype = c2w.dtype
+    #   i indexes the x (column) coordinate in [0, W-1]
+    #   j indexes the y (row) coordinate in [0, H-1]
     # Shapes returned by meshgrid are (W, H) with the call order below, hence
     # the transpose to obtain (H, W) arrays matching image layout.
     i, j = torch.meshgrid(
-        torch.linspace(0, W - 1, W),
-        torch.linspace(0, H - 1, H)
+        torch.linspace(0, W - 1, W, device=device, dtype=dtype),
+        torch.linspace(0, H - 1, H, device=device, dtype=dtype)
     )
 
     # Transpose so that i, j have shape (H, W) instead of (W, H)
@@ -80,7 +83,7 @@ def get_rays(H, W, K, c2w):
     dirs = torch.stack([
         (i - K[0][2]) / K[0][0],
         -(j - K[1][2]) / K[1][1],
-        -torch.ones_like(i)
+        -torch.ones_like(i, device=device, dtype=dtype)
     ], dim=-1)
 
     # Rotate camera-frame directions to world frame using R = c2w[:3, :3].

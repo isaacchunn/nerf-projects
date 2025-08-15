@@ -44,13 +44,11 @@ class Embedder:
 
         # Check if we want to sample frequencies logarithmically or linearly
         if self.kwargs['log_sampling']:
-            # Logarithmic sampling: frequencies like 2^0, 2^1, 2^2, 2^3, etc.
-            # This gives us a good spread from low to high frequencies
-            freq_bands = 2.**torch.linspace(0., max_freq, steps=N_freqs)
+            # Logarithmic sampling. Convert to Python floats to avoid device mismatches later.
+            freq_bands = (2. ** torch.linspace(0., max_freq, steps=N_freqs)).tolist()
         else:
-            # Linear sampling: frequencies like 2^0, 2^1.5, 2^3, 2^4.5, etc.
-            # This gives us evenly spaced frequencies
-            freq_bands = torch.linspace(2.**0., 2.**max_freq, steps=N_freqs)
+            # Linear sampling. Convert to Python floats to avoid device mismatches later.
+            freq_bands = torch.linspace(2.**0., 2.**max_freq, steps=N_freqs).tolist()
         
         # For each frequency we calculated above
         for freq in freq_bands:
@@ -59,6 +57,7 @@ class Embedder:
                 # Create a new function that applies the periodic function to input * frequency
                 # This is the key insight: we multiply input by frequency before applying sin/cos
                 # The lambda captures the current values of p_fn and freq for this iteration
+                # freq is a Python float here, so x * freq keeps device of x
                 embed_fns.append(lambda x, p_fn=p_fn, freq=freq: p_fn(x * freq))
                 # Each periodic function applied to each frequency adds 'd' dimensions to output
                 # So if we have 3D input, 2 periodic functions (sin, cos), and 10 frequencies:
