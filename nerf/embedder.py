@@ -8,6 +8,7 @@ import torch.nn as nn
 class Embedder:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
+        self.create_embedding_fn()
     
     def create_embedding_fn(self):
         # This method creates a list of functions that will transform input coordinates
@@ -79,38 +80,38 @@ class Embedder:
         # This gives us one big vector with all the transformed coordinates
         return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
 
-    def get_embedder(multires, i=0):
-        # This is a factory function that creates and configures positional encoders
-        # multires: controls how many frequency bands we use (higher = more detailed encoding)
-        # i: index parameter (usually 0, but -1 means "no encoding")
-        
-        # Special case: if i == -1, return no positional encoding
-        # This is useful when you want to test NeRF without positional encoding
-        if i == -1:
-            # nn.Identity() does nothing - just returns input as-is
-            # Return 3 because we're still working with 3D coordinates (x, y, z)
-            return nn.Identity(), 3
+def get_embedder(multires, i=0):
+    # This is a factory function that creates and configures positional encoders
+    # multires: controls how many frequency bands we use (higher = more detailed encoding)
+    # i: index parameter (usually 0, but -1 means "no encoding")
+    
+    # Special case: if i == -1, return no positional encoding
+    # This is useful when you want to test NeRF without positional encoding
+    if i == -1:
+        # nn.Identity() does nothing - just returns input as-is
+        # Return 3 because we're still working with 3D coordinates (x, y, z)
+        return nn.Identity(), 3
 
-        # Create a dictionary of configuration parameters for our positional encoder
-        embed_kwargs = {
-            'include_input': True,        # Keep the original 3D coordinates
-            'input_dims': 3,              # We're encoding 3D coordinates (x, y, z)
-            'max_freq_log2': multires-1,  # Maximum frequency = 2^(multires-1)
-            'num_freqs': multires,        # How many different frequencies to use
-            'log_sampling': True,         # Use logarithmic frequency spacing (better for NeRF)
-            'periodic_fns': [torch.sin, torch.cos],  # Use both sine and cosine functions
-        }
-        
-        # Create an Embedder object with our configuration
-        # **embed_kwargs unpacks the dictionary into keyword arguments
-        embedder_obj = Embedder(**embed_kwargs)
-        
-        # Create a convenient lambda function that applies the embedding
-        # This lambda captures the embedder_obj so we can use it later
-        # The lambda takes input x and applies the embedding5 function
-        embed = lambda x, eo=embedder_obj : eo.embed(x)
-        
-        # Return both the embedding function and the output dimension
-        # The output dimension tells other parts of NeRF how big the encoded vectors will be
-        # For example: if multires=10, output_dim = 3 + 2*3*10 = 63 dimensions
-        return embed, embedder_obj.out_dim
+    # Create a dictionary of configuration parameters for our positional encoder
+    embed_kwargs = {
+        'include_input': True,        # Keep the original 3D coordinates
+        'input_dims': 3,              # We're encoding 3D coordinates (x, y, z)
+        'max_freq_log2': multires-1,  # Maximum frequency = 2^(multires-1)
+        'num_freqs': multires,        # How many different frequencies to use
+        'log_sampling': True,         # Use logarithmic frequency spacing (better for NeRF)
+        'periodic_fns': [torch.sin, torch.cos],  # Use both sine and cosine functions
+    }
+    
+    # Create an Embedder object with our configuration
+    # **embed_kwargs unpacks the dictionary into keyword arguments
+    embedder_obj = Embedder(**embed_kwargs)
+    
+    # Create a convenient lambda function that applies the embedding
+    # This lambda captures the embedder_obj so we can use it later
+    # The lambda takes input x and applies the embedding5 function
+    embed = lambda x, eo=embedder_obj : eo.embed(x)
+    
+    # Return both the embedding function and the output dimension
+    # The output dimension tells other parts of NeRF how big the encoded vectors will be
+    # For example: if multires=10, output_dim = 3 + 2*3*10 = 63 dimensions
+    return embed, embedder_obj.out_dim

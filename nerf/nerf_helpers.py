@@ -8,9 +8,9 @@ import numpy as np
 img2mse = lambda x, y : torch.mean((x - y) ** 2)
 
 # Peak Signal-to-Noise Ratio
-# We convert MSE to PSNR by taking MSE and using the formula, in general - higher PSNR = better image quality.
-# Compute natural logarithm of x and divide by natural logarithm of 10.
-mse2psnr = lambda x : -10. * torch.log(x) / torch.log(torch.Tensor([10.]))
+# Convert MSE to PSNR (assumes max pixel value = 1): PSNR = -10 * log10(MSE)
+# Using torch.log10 avoids creating a CPU tensor constant and prevents device mismatches.
+mse2psnr = lambda x : -10. * torch.log10(x)
 
 # Conversion to 8 bit format
 # This converts floating poitn image data in the (0-1) range to 8bit integer format 0-255 for saving displaying images
@@ -202,10 +202,10 @@ def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
 
     # 2) Draw uniform samples u in [0, 1] to invert through the CDF.
     if det:
-        u = torch.linspace(0.0, 1.0, steps=N_samples)
+        u = torch.linspace(0.0, 1.0, steps=N_samples, device=cdf.device, dtype=cdf.dtype)
         u = u.expand(list(cdf.shape[:-1]) + [N_samples])
     else:
-        u = torch.rand(list(cdf.shape[:-1]) + [N_samples])
+        u = torch.rand(list(cdf.shape[:-1]) + [N_samples], device=cdf.device, dtype=cdf.dtype)
 
     # Deterministic path for testing.
     if pytest:

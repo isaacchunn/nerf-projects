@@ -155,7 +155,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     # For the last sample on each ray, append a very large distance so that its
     # contribution is properly modeled as the ray exiting the volume.
     # Resulting shape: [N_rays, N_samples]
-    dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[..., :1].shape)], dim=-1)
+    dists = torch.cat([dists, torch.tensor([1e10], device=dists.device, dtype=dists.dtype).expand(dists[..., :1].shape)], dim=-1)
 
     # Convert parametric distances to metric distances by multiplying by the ray length.
     # This accounts for non-unit ray directions. rays_d[..., None, :] has shape [N_rays, 1, 3]
@@ -166,14 +166,20 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     rgb = torch.sigmoid(raw[..., :3])  # [N_rays, N_samples, 3]
 
     # Optional noise added to densities during training for regularization.
+    # Ensure raw_noise_std is a float (configs may pass strings).
+    try:
+        noise_std = float(raw_noise_std)
+    except (TypeError, ValueError):
+        noise_std = 0.0
+
     noise = 0.0
-    if raw_noise_std > 0.0:
-        noise = torch.randn(raw[..., 3].shape, device=raw.device, dtype=raw.dtype) * raw_noise_std
+    if noise_std > 0.0:
+        noise = torch.randn(raw[..., 3].shape, device=raw.device, dtype=raw.dtype) * noise_std
 
         # Deterministic noise path for unit tests.
         if pytest:
             np.random.seed(0)
-            noise_np = np.random.rand(*list(raw[..., 3].shape)) * raw_noise_std
+            noise_np = np.random.rand(*list(raw[..., 3].shape)) * noise_std
             noise = torch.tensor(noise_np, device=raw.device, dtype=raw.dtype)
 
     # Opacity per sample from density and distance.
@@ -266,7 +272,8 @@ def render_rays(ray_batch,
     near, far = bounds[...,0], bounds[...,1] # [-1,1]
 
     # Step 1: Choose parametric sample positions t in [0, 1] and map to depths z in [near, far].
-    t_vals = torch.linspace(0., 1., steps=N_samples)
+    # Depth sampling parameter in [0,1] on the same device/dtype as bounds
+    t_vals = torch.linspace(0., 1., steps=N_samples, device=near.device, dtype=near.dtype)
     if not lindisp:
         # Uniform samples in depth
         z_vals = near * (1.-t_vals) + far * (t_vals)
@@ -284,13 +291,13 @@ def render_rays(ray_batch,
         upper = torch.cat([mids, z_vals[...,-1:]], -1)
         lower = torch.cat([z_vals[...,:1], mids], -1)
         # Draw stratified samples inside those intervals
-        t_rand = torch.rand(z_vals.shape)
+        t_rand = torch.rand(z_vals.shape, device=z_vals.device, dtype=z_vals.dtype)
 
         # Pytest, overwrite u with numpy's fixed random numbers
         if pytest:
             np.random.seed(0)
             t_rand = np.random.rand(*list(z_vals.shape))
-            t_rand = torch.Tensor(t_rand)
+            t_rand = torch.tensor(t_rand, device=z_vals.device, dtype=z_vals.dtype)
 
         z_vals = lower + (upper - lower) * t_rand
 
