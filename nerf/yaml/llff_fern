@@ -13,9 +13,9 @@ ft_path: null
 half_res: false
 i_embed: 0
 i_img: 500
-i_print: 100
+i_print: 1000
 i_testset: 50000
-i_video: 100
+i_video: 50000
 i_weights: 10000
 lindisp: false
 llffhold: 8
