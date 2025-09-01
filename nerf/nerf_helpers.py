@@ -17,6 +17,202 @@ def mse2psnr(x: torch.Tensor) -> torch.Tensor:
 # This converts floating poitn image data in the (0-1) range to 8bit integer format 0-255 for saving displaying images
 to8b = lambda x : (255 * np.clip(x, 0, 1)).astype(np.uint8)
 
+# SSIM and LPIPS metrics for image quality evaluation
+def calculate_ssim(img1, img2, max_val=1.0, filter_size=11, filter_sigma=1.5, k1=0.01, k2=0.03, return_map=False):
+    """
+    Calculate Structural Similarity Index (SSIM) between two images.
+    
+    This function matches the implementation from other NeRF repositories for consistency.
+    Based on tf.image.ssim implementation.
+    
+    Args:
+        img1 (torch.Tensor or np.ndarray): First image with shape [H, W, 3]
+        img2 (torch.Tensor or np.ndarray): Second image with shape [H, W, 3]  
+        max_val (float): The maximum magnitude that img1 or img2 can have.
+        filter_size (int): Window size.
+        filter_sigma (float): The bandwidth of the Gaussian used for filtering.
+        k1 (float): One of the SSIM dampening parameters.
+        k2 (float): One of the SSIM dampening parameters.
+        return_map (bool): If True, will return the per-pixel SSIM map.
+        
+    Returns:
+        float or torch.Tensor: Mean SSIM value, or SSIM map if return_map=True
+    """
+    import torch.nn.functional as F
+    
+    # Convert to tensors if needed
+    if isinstance(img1, np.ndarray):
+        img1 = torch.from_numpy(img1).float()
+    if isinstance(img2, np.ndarray):
+        img2 = torch.from_numpy(img2).float()
+    
+    # Ensure tensors are on the same device
+    device = img1.device if torch.is_tensor(img1) else img2.device
+    img1 = img1.to(device)
+    img2 = img2.to(device)
+    
+    # Ensure images are in [0, max_val] range
+    img1 = torch.clamp(img1, 0, max_val)
+    img2 = torch.clamp(img2, 0, max_val)
+    
+    # Reshape to [..., width, height, num_channels] format expected by the function
+    ori_shape = img1.size()
+    if len(ori_shape) == 3:  # [H, W, C]
+        width, height, num_channels = ori_shape
+        img1 = img1.view(-1, width, height, num_channels).permute(0, 3, 1, 2)  # [B, C, H, W]
+        img2 = img2.view(-1, width, height, num_channels).permute(0, 3, 1, 2)
+        batch_size = img1.shape[0]
+    else:
+        raise ValueError(f"Expected 3D tensor [H, W, C], got {ori_shape}")
+
+    # Construct a 1D Gaussian blur filter
+    hw = filter_size // 2
+    shift = (2 * hw - filter_size + 1) / 2
+    f_i = ((torch.arange(filter_size, device=device) - hw + shift) / filter_sigma) ** 2
+    filt = torch.exp(-0.5 * f_i)
+    filt /= torch.sum(filt)
+
+    # Blur in x and y (faster than the 2D convolution)
+    filt_fn1 = lambda z: F.conv2d(
+        z, filt.view(1, 1, -1, 1).repeat(num_channels, 1, 1, 1),
+        padding=[hw, 0], groups=num_channels)
+    filt_fn2 = lambda z: F.conv2d(
+        z, filt.view(1, 1, 1, -1).repeat(num_channels, 1, 1, 1),
+        padding=[0, hw], groups=num_channels)
+
+    # Compose the blurs
+    filt_fn = lambda z: filt_fn1(filt_fn2(z))
+    mu0 = filt_fn(img1)
+    mu1 = filt_fn(img2)
+    mu00 = mu0 * mu0
+    mu11 = mu1 * mu1
+    mu01 = mu0 * mu1
+    sigma00 = filt_fn(img1 ** 2) - mu00
+    sigma11 = filt_fn(img2 ** 2) - mu11
+    sigma01 = filt_fn(img1 * img2) - mu01
+
+    # Clip the variances and covariances to valid values
+    sigma00 = torch.clamp(sigma00, min=0.0)
+    sigma11 = torch.clamp(sigma11, min=0.0)
+    sigma01 = torch.sign(sigma01) * torch.min(
+        torch.sqrt(sigma00 * sigma11), torch.abs(sigma01)
+    )
+
+    c1 = (k1 * max_val) ** 2
+    c2 = (k2 * max_val) ** 2
+    numer = (2 * mu01 + c1) * (2 * sigma01 + c2)
+    denom = (mu00 + mu11 + c1) * (sigma00 + sigma11 + c2)
+    ssim_map = numer / denom
+    ssim = torch.mean(ssim_map.reshape([-1, num_channels*width*height]), dim=-1)
+    
+    if return_map:
+        return ssim_map
+    else:
+        return ssim.item() if ssim.numel() == 1 else ssim.mean().item()
+
+def calculate_lpips(img1, img2, net='vgg', device='cuda', normalize=True):
+    """
+    Calculate Learned Perceptual Image Patch Similarity (LPIPS) between two images.
+    
+    This function matches the implementation from other NeRF repositories for consistency.
+    Uses VGG backbone by default as in the reference implementation.
+    
+    Args:
+        img1 (torch.Tensor or np.ndarray): First image with shape [H, W, 3]
+        img2 (torch.Tensor or np.ndarray): Second image with shape [H, W, 3]
+        net (str): Network to use ('alex', 'vgg', 'squeeze'). Default: 'vgg' for consistency
+        device (str): Device to run computation on. Default: 'cuda'
+        normalize (bool): Whether to normalize inputs. Default: True
+        
+    Returns:
+        float: LPIPS distance (lower is better, 0 = identical)
+    """
+    import lpips
+    
+    # Convert numpy to tensors if needed
+    if isinstance(img1, np.ndarray):
+        img1 = torch.from_numpy(img1).float()
+    if isinstance(img2, np.ndarray):
+        img2 = torch.from_numpy(img2).float()
+    
+    # Ensure tensors are on the correct device
+    img1 = img1.to(device)
+    img2 = img2.to(device)
+    
+    # Convert [H, W, 3] to [3, H, W] format expected by LPIPS
+    img1 = img1.permute(2, 0, 1).contiguous()  # [H, W, 3] -> [3, H, W]
+    img2 = img2.permute(2, 0, 1).contiguous()
+    
+    # Initialize LPIPS model with VGG backbone (cached after first call)
+    if not hasattr(calculate_lpips, 'loss_fn') or calculate_lpips.net != net:
+        calculate_lpips.loss_fn = lpips.LPIPS(net=net).eval().to(device)
+        calculate_lpips.net = net
+    
+    # Calculate LPIPS distance
+    with torch.no_grad():
+        distance = calculate_lpips.loss_fn(img1, img2, normalize=normalize)
+    
+    return distance.item()
+
+def calculate_metrics(img1, img2, include_lpips=True, lpips_net='vgg', device='cuda'):
+    """
+    Calculate comprehensive image quality metrics between two images.
+    
+    This follows the standard evaluation methodology used in NeRF papers:
+    - PSNR: Peak Signal-to-Noise Ratio (higher is better)
+    - SSIM: Structural Similarity Index (0-1, higher is better) 
+    - LPIPS: Learned Perceptual Image Patch Similarity (lower is better)
+    
+    Args:
+        img1 (torch.Tensor or np.ndarray): First image with shape [H, W, 3]
+        img2 (torch.Tensor or np.ndarray): Second image with shape [H, W, 3]
+        include_lpips (bool): Whether to calculate LPIPS (slower). Default: True
+        lpips_net (str): Network to use for LPIPS ('alex', 'vgg', 'squeeze'). Default: 'vgg'
+        device (str): Device for LPIPS computation. Default: 'cuda'
+        
+    Returns:
+        dict: Dictionary containing 'mse', 'psnr', 'ssim', and optionally 'lpips'
+        
+    Note: 
+        - Images should be in [0,1] range (this function will clip to ensure this)
+        - SSIM uses data_range=1.0 for [0,1] images
+        - LPIPS uses VGG backbone by default (consistent with reference implementations)
+    """
+    # Ensure images are in [0,1] range and proper format
+    if isinstance(img1, np.ndarray):
+        img1_tensor = torch.from_numpy(np.clip(img1, 0, 1)).float()
+    else:
+        img1_tensor = torch.clamp(img1.float(), 0, 1)
+    
+    if isinstance(img2, np.ndarray):
+        img2_tensor = torch.from_numpy(np.clip(img2, 0, 1)).float()
+    else:
+        img2_tensor = torch.clamp(img2.float(), 0, 1)
+    
+    # Calculate MSE and PSNR (standard NeRF evaluation)
+    mse = img2mse(img1_tensor, img2_tensor).item()
+    psnr = mse2psnr(torch.tensor(mse)).item()
+    
+    # Calculate SSIM
+    ssim_val = calculate_ssim(img1, img2)
+    
+    metrics = {
+        'mse': mse,
+        'psnr': psnr,
+        'ssim': ssim_val
+    }
+    
+    # Calculate LPIPS if requested
+    if include_lpips:
+        try:
+            lpips_val = calculate_lpips(img1, img2, net=lpips_net, device=device)
+            metrics['lpips'] = lpips_val
+        except Exception as e:
+            print(f"Warning: Could not calculate LPIPS: {e}")
+            metrics['lpips'] = None
+    
+    return metrics
+
 
 # We need functions to generate one camera ray per pixel for an image, with the following contents
 # 1. The ray's origin, where it starts,
