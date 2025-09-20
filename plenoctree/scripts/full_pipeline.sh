@@ -12,8 +12,8 @@ trap 'echo "❌ Pipeline aborted due to error on line $LINENO"' ERR
 # =============================================================================
 
 # Data and output paths
-export DATA_ROOT="/mnt/d/GitHub/plenoctree/data/NeRF/nerf_synthetic"
-export CKPT_ROOT="/mnt/d/GitHub/plenoctree/data/Plenoctree/checkpoints/syn_sh16"
+export DATA_ROOT="/mnt/d/GitHub/nerf-projects/plenoctree/data/NeRF/nerf_synthetic"
+export CKPT_ROOT="/mnt/d/GitHub/nerf-projects/plenoctree/data/Plenoctree/checkpoints/syn_sh16"
 export SCENE="chair"
 export CONFIG_FILE="nerf_sh/config/blender"
 

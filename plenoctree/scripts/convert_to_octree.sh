@@ -5,8 +5,8 @@ set -o pipefail  # Capture errors in pipes
 trap 'echo "❌ Script aborted due to error on line $LINENO"' ERR
 
 # Configuration - Edit these paths as needed
-export DATA_ROOT="/mnt/d/GitHub/plenoctree/data/NeRF/nerf_synthetic"
-export CKPT_ROOT="/mnt/d/GitHub/plenoctree/data/Plenoctree/checkpoints/syn_sh16"
+export DATA_ROOT="/mnt/d/GitHub/nerf-projects/plenoctree/data/NeRF/nerf_synthetic"
+export CKPT_ROOT="/mnt/d/GitHub/nerf-projects/plenoctree/data/Plenoctree/checkpoints/syn_sh16"
 export SCENE="chair"
 # export CHECKPOINT_NUM="checkpoint_200000"  # Specify the exact checkpoint to use
 export CONFIG_FILE="nerf_sh/config/blender"

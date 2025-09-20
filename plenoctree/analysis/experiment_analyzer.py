@@ -72,7 +72,7 @@ plt.rcParams.update({
 class SimplePlenOctreeAnalyzer:
     """Beautiful analyzer with proper averaging and post-compression evaluation"""
     
-    def __init__(self, base_path="/mnt/d/Github/plenoctree/data/Plenoctree/checkpoints"):
+    def __init__(self, base_path="/mnt/d/GitHub/nerf-projects/plenoctree/data/Plenoctree/checkpoints"):
         self.base_path = Path(base_path)
         
     def discover_scenes(self, config_name="syn_sh16"):
