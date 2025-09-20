@@ -18,5 +18,6 @@ PyYAML==6.0.2
 scikit-image>=0.18.0  # For SSIM calculation
 lpips>=0.1.4          # For LPIPS (Learned Perceptual Image Patch Similarity)
 pandas>=1.3.0         # For CSV logging
+seaborn>=0.11.0
 # torchsearchsorted - install separately if needed:
 # pip install git+https://github.com/aliutkus/torchsearchsorted
