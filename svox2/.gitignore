@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+*$py.class
+Session.vim
+ckpt/
+ckpt copy/
+data
