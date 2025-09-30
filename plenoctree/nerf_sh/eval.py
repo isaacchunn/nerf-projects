@@ -143,9 +143,9 @@ def main(unused_argv):
                 psnrs.append(float(psnr))
                 ssims.append(float(ssim))
                 
-                # Calculate LPIPS only every 5 iterations to save computation time
+                # Calculate LPIPS
                 lpips_score = None
-                if lpips_fn is not None and idx % 5 == 0:
+                if lpips_fn is not None:
                     # Convert to tensor format for LPIPS (CHW format, range [0,1])
                     # Convert JAX arrays to numpy first
                     pred_np = np.array(pred_color) if hasattr(pred_color, 'device') else pred_color
