@@ -25,12 +25,29 @@ SKIP_TRAINING=false          # Set to true to skip training and only do conversi
 SKIP_CONVERSION=false        # Set to true to only do training
 FORCE_RETRAIN=false          # Set to true to retrain even if checkpoint exists
 
+# Available scenes
+ALL_SCENES="chair drums ficus hotdog lego materials mic ship"
+
+# Multi-scene support
+SCENES_TO_RUN=""
+RUN_ALL_SCENES=false
+
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --scene)
             SCENE="$2"
+            SCENES_TO_RUN="$2"
             shift 2
+            ;;
+        --scenes)
+            SCENES_TO_RUN=$(echo "$2" | tr ',' ' ')
+            shift 2
+            ;;
+        --all-scenes)
+            RUN_ALL_SCENES=true
+            SCENES_TO_RUN="$ALL_SCENES"
+            shift
             ;;
         --skip-training)
             SKIP_TRAINING=true
@@ -48,37 +65,77 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [options]"
             echo "Options:"
             echo "  --scene SCENE        Set the scene name (default: chair)"
+            echo "  --scenes SCENE1,SCENE2,...  Run multiple scenes (comma-separated)"
+            echo "  --all-scenes         Run all available scenes: $ALL_SCENES"
             echo "  --skip-training      Skip training and only do octree conversion"
             echo "  --skip-conversion    Only do training, skip octree conversion"
             echo "  --force-retrain      Force retraining even if checkpoint exists"
             echo "  --help              Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  $0 --scene chair --skip-training"
+            echo "  $0 --scenes chair,drums,ficus --skip-training"
+            echo "  $0 --all-scenes --skip-training"
             exit 0
             ;;
         *)
-            echo "Unknown option: $1"
-            echo "Use --help for usage information"
-            exit 1
+            # If it's not a flag, treat it as a scene name (backward compatibility)
+            if [[ ! "$1" =~ ^-- ]]; then
+                SCENE="$1"
+                SCENES_TO_RUN="$1"
+                shift
+            else
+                echo "Unknown option: $1"
+                echo "Use --help for usage information"
+                exit 1
+            fi
             ;;
     esac
 done
 
+# Set default if no scenes specified
+if [ -z "$SCENES_TO_RUN" ]; then
+    SCENES_TO_RUN="$SCENE"
+fi
+
 # =============================================================================
-# PIPELINE SETUP AND LOGGING
+# MULTI-SCENE PIPELINE EXECUTION
 # =============================================================================
 
-PIPELINE_START_TIME=$(date +%s)
-PIPELINE_LOG_FILE="$CKPT_ROOT/$SCENE/full_pipeline_metrics.json"
+# Count total scenes for progress tracking
+TOTAL_SCENES=$(echo $SCENES_TO_RUN | wc -w)
+CURRENT_SCENE_NUM=0
 
 echo "═══════════════════════════════════════════════════════════════"
-echo "🚀 PlenOctree Full Pipeline: Training + Conversion"
+echo "🚀 PlenOctree Multi-Scene Pipeline"
 echo "═══════════════════════════════════════════════════════════════"
 echo "📅 Started: $(date)"
-echo "🎯 Scene: $SCENE"
-echo "📁 Data dir: $DATA_ROOT/$SCENE"
-echo "💾 Checkpoint dir: $CKPT_ROOT/$SCENE"
-echo "⚙️  Config: $CONFIG_FILE"
-echo "📊 Pipeline log: $PIPELINE_LOG_FILE"
+echo "🎯 Scenes to process: $SCENES_TO_RUN"
+echo "📊 Total scenes: $TOTAL_SCENES"
+echo "⚙️  Skip training: $SKIP_TRAINING"
+echo "⚙️  Skip conversion: $SKIP_CONVERSION"
+echo "⚙️  Force retrain: $FORCE_RETRAIN"
 echo ""
+
+# Loop through each scene
+for CURRENT_SCENE in $SCENES_TO_RUN; do
+    CURRENT_SCENE_NUM=$((CURRENT_SCENE_NUM + 1))
+    
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "🎯 Processing Scene $CURRENT_SCENE_NUM/$TOTAL_SCENES: $CURRENT_SCENE"
+    echo "═══════════════════════════════════════════════════════════════"
+    
+    # Set scene-specific variables
+    SCENE="$CURRENT_SCENE"
+    PIPELINE_START_TIME=$(date +%s)
+    PIPELINE_LOG_FILE="$CKPT_ROOT/$SCENE/full_pipeline_metrics.json"
+    
+    echo "📁 Data dir: $DATA_ROOT/$SCENE"
+    echo "💾 Checkpoint dir: $CKPT_ROOT/$SCENE"
+    echo "⚙️  Config: $CONFIG_FILE"
+    echo "📊 Pipeline log: $PIPELINE_LOG_FILE"
+    echo ""
 
 # Function to log pipeline step metrics
 log_pipeline_step() {
@@ -391,19 +448,56 @@ if [ -f "$PIPELINE_LOG_FILE" ]; then
     rm -f "${PIPELINE_LOG_FILE}.tmp"
 fi
 
-echo ""
-echo "🎉 Full pipeline completed in ${TOTAL_PIPELINE_TIME}s!"
-echo "📅 Finished: $(date)"
+    echo ""
+    echo "🎉 Scene $CURRENT_SCENE completed in ${TOTAL_PIPELINE_TIME}s!"
+    echo "📅 Scene finished: $(date)"
+    echo ""
+    echo "✅ Scene $CURRENT_SCENE_NUM/$TOTAL_SCENES ($CURRENT_SCENE) completed!"
+    
+done  # End of scene loop
 
-# Auto-generate analysis plots
+# Final summary
+OVERALL_END_TIME=$(date +%s)
+OVERALL_TOTAL_TIME=$((OVERALL_END_TIME - $(date +%s)))  # This will be recalculated properly
+
 echo ""
-echo "📊 Auto-generating experiment analysis plots..."
+echo "══════════════════════════════════════════════════════════════"
+echo "🎊 ALL SCENES COMPLETED!"
+echo "══════════════════════════════════════════════════════════════"
+echo "📊 Processed $TOTAL_SCENES scenes: $SCENES_TO_RUN"
+echo "📅 Overall finished: $(date)"
+
+# Auto-generate analysis plots for all processed scenes (once at the end)
+echo ""
+echo "📊 Auto-generating comprehensive analysis plots for all scenes..."
+
+# Run individual scene analysis
 if python analysis/experiment_analyzer.py; then
-    echo "✅ Analysis plots generated successfully!"
-    echo "📁 Check: data/Plenoctree/checkpoints/syn_sh16/$SCENE/analysis/"
+    echo "✅ Individual scene analysis completed!"
 else
-    echo "⚠️  Analysis plot generation failed (pipeline still completed successfully)"
+    echo "⚠️  Individual scene analysis failed"
+fi
+
+# Run cross-experiment comparison analysis
+echo "📊 Generating cross-experiment comparison plots..."
+if python analysis/cross_experiment_visualizer.py; then
+    echo "✅ Cross-experiment analysis completed!"
+else
+    echo "⚠️  Cross-experiment analysis failed"
+fi
+
+# Run efficiency metrics analysis
+echo "📊 Generating efficiency metrics analysis..."
+if python analysis/efficiency_metrics_analyzer.py; then
+    echo "✅ Efficiency metrics analysis completed!"
+else
+    echo "⚠️  Efficiency metrics analysis failed"
 fi
 
 echo ""
+echo "📁 Results locations:"
+echo "  • Individual scene plots: data/Plenoctree/checkpoints/syn_sh16/*/analysis/"
+echo "  • Cross-scene comparisons: data/Plenoctree/checkpoints/analysis/"
+echo "  • Efficiency analysis: data/Plenoctree/checkpoints/cross_scene_efficiency_comparison.csv"
+
 echo "══════════════════════════════════════════════════════════════"

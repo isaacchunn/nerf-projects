@@ -681,7 +681,10 @@ def main(unused_argv):
             psnr=avg_psnr,
             ssim=avg_ssim,
             lpips=avg_lpips,
-            snapshot=eval_snapshot
+            snapshot=eval_snapshot,
+            octree_capacity=int(tree.n_internal + tree.n_leaves),
+            octree_file_size_mb=file_size_mb,
+            init_grid_depth=FLAGS.init_grid_depth
         )
         
         metrics_logger.log_octree_evaluation(

@@ -259,8 +259,18 @@ def main(unused_argv):
             # Capture memory snapshot and log validation metrics
             eval_snapshot = memory_tracker.capture_snapshot(i)
             memory_metrics = memory_tracker.get_memory_metrics(eval_snapshot)
+            # Get octree capacity and file size for new metrics
+            octree_capacity = int(t.n_internal + t.n_leaves) if hasattr(t, 'n_internal') and hasattr(t, 'n_leaves') else None
+            octree_file_size_mb = os.path.getsize(FLAGS.input) / (1024 * 1024) if os.path.exists(FLAGS.input) else None
+            
+            # Get init_grid_depth from octree max_depth
+            init_grid_depth = int(t.max_depth) if hasattr(t, 'max_depth') else None
+            
             efficiency_indices = memory_tracker.calculate_efficiency_indices(
-                tpsnr, tssim, tlpips if use_lpips else None, eval_snapshot
+                tpsnr, tssim, tlpips if use_lpips else None, eval_snapshot,
+                octree_capacity=octree_capacity,
+                octree_file_size_mb=octree_file_size_mb,
+                init_grid_depth=init_grid_depth
             )
             
             eval_time = time.time() - eval_start_time

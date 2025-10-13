@@ -9,3 +9,5 @@ batch_size: 1024
 sh_deg: 3
 randomized: true
 max_steps: 200000
+lr_delay_steps: 50000
+lr_delay_mult: 0.01

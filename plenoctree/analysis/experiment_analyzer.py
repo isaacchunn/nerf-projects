@@ -15,6 +15,10 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
+# Import unified theme
+from visualization_theme import (Colors, Typography, PlotElements, 
+                                 PlotTemplates, get_scene_color, get_metric_color)
+
 def format_3_sig_figs(value):
     """Format number to 3 significant figures consistently."""
     if value == 0:
@@ -519,7 +523,7 @@ class SimplePlenOctreeAnalyzer:
         
         # Simplified main title
         fig.suptitle(f'PlenOctree Pipeline Analysis - {scene.upper()}', 
-                    fontsize=22, fontweight='bold', y=0.95)
+                    fontsize=24, fontweight='bold', y=0.96)
         
         # Create simplified grid layout (2x3 instead of 4x3)
         gs = fig.add_gridspec(2, 3, hspace=0.4, wspace=0.3)
@@ -548,8 +552,8 @@ class SimplePlenOctreeAnalyzer:
         # Add gradient background
         ax1.fill_between(x_pos, psnr_vals, alpha=0.2, color=colors['psnr'])
         
-        ax1.set_title('📊 PSNR Progression\nPeak Signal-to-Noise Ratio (Higher = Better)', 
-                     fontweight='bold', pad=20)
+        ax1.set_title('PSNR Progression\nPeak Signal-to-Noise Ratio (Higher is Better)', 
+                     fontweight='bold', pad=20, fontsize=15)
         ax1.set_ylabel('PSNR (dB)', fontweight='bold')
         ax1.set_xticks(x_pos)
         ax1.set_xticklabels([s.split()[1] if len(s.split()) > 1 else s for s in stage_names], rotation=0, ha='center')
@@ -589,8 +593,8 @@ class SimplePlenOctreeAnalyzer:
             
             ax2.fill_between(valid_ssim_idx, valid_ssim_vals, alpha=0.2, color=colors['ssim'])
         
-        ax2.set_title('📈 SSIM Progression\nStructural Similarity Index (Higher = Better)', 
-                     fontweight='bold', pad=20)
+        ax2.set_title('SSIM Progression\nStructural Similarity Index (Higher is Better)', 
+                     fontweight='bold', pad=20, fontsize=15)
         ax2.set_ylabel('SSIM (0-1)', fontweight='bold')
         ax2.set_xticks(x_pos)
         ax2.set_xticklabels([s.split()[1] if len(s.split()) > 1 else s for s in stage_names], rotation=0, ha='center')
@@ -621,8 +625,8 @@ class SimplePlenOctreeAnalyzer:
             
             ax3.fill_between(valid_lpips_idx, valid_lpips_vals, alpha=0.2, color=colors['lpips'])
         
-        ax3.set_title('📉 LPIPS Progression\nLearned Perceptual Similarity (Lower = Better)', 
-                     fontweight='bold', pad=20)
+        ax3.set_title('LPIPS Progression\nLearned Perceptual Similarity (Lower is Better)', 
+                     fontweight='bold', pad=20, fontsize=15)
         ax3.set_ylabel('LPIPS (0-1)', fontweight='bold')
         ax3.set_xticks(x_pos)
         ax3.set_xticklabels([s.split()[1] if len(s.split()) > 1 else s for s in stage_names], rotation=0, ha='center')
@@ -650,8 +654,8 @@ class SimplePlenOctreeAnalyzer:
                     ax4.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.05,
                             format_3_sig_figs(val), ha='center', va='bottom', fontweight='bold', fontsize=9)
         
-        ax4.set_title('💾 Memory Usage Comparison\n⚠️ GPU Allocated may underestimate true usage', 
-                     fontweight='bold', pad=20)
+        ax4.set_title('Memory Usage Comparison\nNote: GPU Allocated may underestimate true usage', 
+                     fontweight='bold', pad=20, fontsize=15)
         ax4.set_ylabel('Memory (GB)', fontweight='bold')
         ax4.set_xticks(x_pos)
         ax4.set_xticklabels([s.split()[1] if len(s.split()) > 1 else s for s in stage_names], rotation=0, ha='center')
@@ -676,8 +680,8 @@ class SimplePlenOctreeAnalyzer:
                 bars = ax5.bar(range(len(improvements)), improvements, color=bar_colors, 
                               alpha=0.8, edgecolor='white', linewidth=2)
                 
-                ax5.set_title('⬆️ PSNR Improvements Over NeRF\nOctree Optimization Benefits', 
-                             fontweight='bold', pad=20)
+                ax5.set_title('PSNR Improvements Over NeRF Baseline\nOctree Optimization Benefits', 
+                             fontweight='bold', pad=20, fontsize=15)
                 ax5.set_ylabel('PSNR Improvement (dB)', fontweight='bold')
                 ax5.set_xticks(range(len(improvements)))
                 ax5.set_xticklabels([label.split()[1] if len(label.split()) > 1 else label for label in improvement_labels], rotation=0, ha='center')
@@ -729,8 +733,8 @@ class SimplePlenOctreeAnalyzer:
                 ax6.plot(x_combined, valid_combined, 's-', color=colors['ssim'], 
                         linewidth=3, markersize=8, label='Combined Quality-Memory Index')
             
-            ax6.set_title('⚡ Memory Efficiency Indices\nHigher = More Efficient', 
-                         fontweight='bold', pad=20)
+            ax6.set_title('Memory Efficiency Indices\nHigher Values = More Efficient', 
+                         fontweight='bold', pad=20, fontsize=15)
             ax6.set_ylabel('Efficiency Index', fontweight='bold')
             ax6.set_xticks(range(len(stages)))
             ax6.set_xticklabels([s['name'].split()[1] if len(s['name'].split()) > 1 else s['name'] for s in stages], rotation=0, ha='center')
@@ -752,28 +756,28 @@ class SimplePlenOctreeAnalyzer:
         if plot_type == 'psnr':
             values = [s['psnr'] for s in stages]
             color = colors['psnr']
-            title = f'📊 PSNR Progression - {scene.upper()}'
-            subtitle = 'Peak Signal-to-Noise Ratio (Higher = Better)'
+            title = f'PSNR Progression - {scene.upper()}'
+            subtitle = 'Peak Signal-to-Noise Ratio (Higher is Better)'
             ylabel = 'PSNR (dB)'
             format_str = '{:.2f} dB'
         elif plot_type == 'ssim':
             values = [s['ssim'] for s in stages]
             color = colors['ssim']
-            title = f'📈 SSIM Progression - {scene.upper()}'
-            subtitle = 'Structural Similarity Index (Higher = Better)'
+            title = f'SSIM Progression - {scene.upper()}'
+            subtitle = 'Structural Similarity Index (Higher is Better)'
             ylabel = 'SSIM (0-1)'
             format_str = '{:.4f}'
         elif plot_type == 'lpips':
             values = [s['lpips'] for s in stages]
             color = colors['lpips']
-            title = f'📉 LPIPS Progression - {scene.upper()}'
-            subtitle = 'Learned Perceptual Similarity (Lower = Better)'
+            title = f'LPIPS Progression - {scene.upper()}'
+            subtitle = 'Learned Perceptual Similarity (Lower is Better)'
             ylabel = 'LPIPS (0-1)'
             format_str = '{:.4f}'
         elif plot_type == 'memory':
             values = [s['memory'] for s in stages]
             color = colors['memory']
-            title = f'💾 Memory Usage - {scene.upper()}'
+            title = f'Memory Usage - {scene.upper()}'
             subtitle = 'GPU Memory Requirements per Stage'
             ylabel = 'Memory (GB)'
             format_str = '{:.2f} GB'
@@ -849,8 +853,8 @@ class SimplePlenOctreeAnalyzer:
         
         # Create clean timing table (single plot with table)
         fig, ax = plt.subplots(1, 1, figsize=(12, 8))
-        fig.suptitle(f'🕒 Pipeline Timing Analysis - {scene.upper()}', 
-                    fontsize=16, fontweight='bold', y=0.95)
+        fig.suptitle(f'Pipeline Timing Analysis - {scene.upper()}', 
+                    fontsize=18, fontweight='bold', y=0.95)
         
         ax.axis('off')
         
@@ -871,8 +875,8 @@ class SimplePlenOctreeAnalyzer:
         if total_time > 0:
             total_time_str = format_3_sig_figs(total_time)
             total_minutes_str = format_3_sig_figs(total_time / 60)
-            table_data.append(['━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', '━━━━━━━━━━━━━━━━━', '━━━━━━━━━━━━━━━━━'])
-            table_data.append([f'🏁 TOTAL PIPELINE TIME', f"{total_time_str}s", f"{total_minutes_str}m"])
+            table_data.append(['='*50, '='*17, '='*17])
+            table_data.append(['TOTAL PIPELINE TIME', f"{total_time_str}s", f"{total_minutes_str}m"])
         
         if table_data:
             # Create beautiful table
@@ -914,9 +918,9 @@ class SimplePlenOctreeAnalyzer:
             if total_time > 0:
                 hours = total_time / 3600
                 if hours >= 1:
-                    summary_text = f"Total: {format_3_sig_figs(total_time)}s ({format_3_sig_figs(total_time/60)}m = {format_3_sig_figs(hours)}h)"
+                    summary_text = f"Total Pipeline Time: {format_3_sig_figs(total_time)}s ({format_3_sig_figs(total_time/60)}m = {format_3_sig_figs(hours)}h)"
                 else:
-                    summary_text = f"Total: {format_3_sig_figs(total_time)}s ({format_3_sig_figs(total_time/60)} minutes)"
+                    summary_text = f"Total Pipeline Time: {format_3_sig_figs(total_time)}s ({format_3_sig_figs(total_time/60)} minutes)"
                 
                 ax.text(0.5, 0.15, summary_text, 
                        horizontalalignment='center', verticalalignment='center',

@@ -344,9 +344,18 @@ class MemoryTracker:
                                    psnr: float, 
                                    ssim: Optional[float] = None, 
                                    lpips: Optional[float] = None,
-                                   snapshot: Optional[MemorySnapshot] = None) -> Dict[str, float]:
+                                   snapshot: Optional[MemorySnapshot] = None,
+                                   octree_capacity: Optional[int] = None,
+                                   octree_file_size_mb: Optional[float] = None,
+                                   init_grid_depth: Optional[int] = None) -> Dict[str, float]:
         """
-        Calculate memory efficiency indices.
+        Calculate memory efficiency indices using accurate GPU memory measurements.
+        
+        Memory selection priority (most to least accurate):
+        1. nvidia-smi GPU memory (system-level, includes all processes)
+        2. GPU reserved memory (PyTorch reserved + cache)
+        3. GPU allocated memory (active PyTorch tensors only)
+        4. Process RSS memory (fallback for CPU-only)
         
         Args:
             psnr: Peak Signal-to-Noise Ratio
@@ -355,22 +364,61 @@ class MemoryTracker:
             snapshot: Memory snapshot (if None, captures current state)
         
         Returns:
-            Dictionary of efficiency indices
+            Dictionary of efficiency indices including:
+            - memory_efficiency_index: PSNR per GB of memory
+            - quality_memory_tradeoff: (PSNR * SSIM) per GB
+            - combined_quality_memory_index: (PSNR * SSIM * (1-LPIPS)) per GB
         """
         if snapshot is None:
             snapshot = self.capture_snapshot()
         
         indices = {}
         
-        # Primary memory for calculations (use GPU if available, otherwise process memory)
-        primary_memory = snapshot.gpu_allocated if self.has_gpu and snapshot.gpu_allocated > 0 else snapshot.process_rss
-        peak_memory = self.peak_gpu_allocated if self.has_gpu else self.peak_process_rss
+        # Primary memory for calculations - prioritize nvidia-smi for accuracy
+        # Use nvidia-smi memory (most accurate) > gpu_reserved > gpu_allocated > process memory
+        primary_memory = None
+        peak_memory = None
+        
+        if self.has_gpu:
+            # Prioritize nvidia-smi memory (actual system-level GPU usage)
+            if snapshot.nvidia_smi_used_gb and snapshot.nvidia_smi_used_gb > 0:
+                primary_memory = snapshot.nvidia_smi_used_gb
+                # For peak, use the larger of current nvidia-smi or tracked peak
+                peak_memory = max(snapshot.nvidia_smi_used_gb, self.peak_gpu_allocated)
+            # Fallback to GPU reserved memory (includes PyTorch caching)
+            elif snapshot.gpu_reserved > 0:
+                primary_memory = snapshot.gpu_reserved
+                peak_memory = self.peak_gpu_reserved
+            # Last resort: GPU allocated memory (only active tensors)
+            elif snapshot.gpu_allocated > 0:
+                primary_memory = snapshot.gpu_allocated
+                peak_memory = self.peak_gpu_allocated
+        
+        # If no GPU memory available, use process memory
+        if primary_memory is None or primary_memory <= 0:
+            primary_memory = snapshot.process_rss
+            peak_memory = self.peak_process_rss
         
         # Safety check: ensure we have non-zero values for calculations
         if primary_memory <= 0:
             primary_memory = 0.001  # 1MB minimum to avoid division by zero
         if peak_memory <= 0:
             peak_memory = primary_memory  # Use current memory if no peak recorded
+        
+        # Add metadata about which memory type was used
+        memory_source = "unknown"
+        if self.has_gpu and snapshot.nvidia_smi_used_gb and snapshot.nvidia_smi_used_gb > 0:
+            memory_source = "nvidia_smi"
+        elif self.has_gpu and snapshot.gpu_reserved > 0:
+            memory_source = "gpu_reserved"
+        elif self.has_gpu and snapshot.gpu_allocated > 0:
+            memory_source = "gpu_allocated"
+        else:
+            memory_source = "process_rss"
+        
+        indices["memory_source"] = memory_source
+        indices["primary_memory_gb"] = primary_memory
+        indices["peak_memory_gb"] = peak_memory
         
         # Memory Efficiency Index (MEI): PSNR per GB of memory
         indices["memory_efficiency_index"] = psnr / primary_memory
@@ -396,6 +444,35 @@ class MemoryTracker:
             combined_quality = psnr * ssim * (1.0 - lpips)
             indices["combined_quality_memory_index"] = combined_quality / primary_memory
             indices["peak_combined_quality_memory_index"] = combined_quality / peak_memory
+        
+        # NEW: Storage-Aware Memory Efficiency Index (MEI) and Voxel Density Efficiency (VDE)
+        if octree_capacity is not None and octree_file_size_mb is not None and init_grid_depth is not None:
+            # Calculate compression ratio
+            reso = 2 ** (init_grid_depth + 1)
+            total_possible_voxels = reso ** 3
+            compression_ratio = total_possible_voxels / octree_capacity
+            
+            # Calculate storage size in GB
+            storage_size_gb = octree_file_size_mb / 1024
+            
+            # Ensure we have non-zero storage size
+            if storage_size_gb <= 0:
+                storage_size_gb = 0.001  # 1MB minimum to avoid division by zero
+            
+            # Storage-Aware Memory Efficiency Index (MEI)
+            import math
+            log_compression = math.log10(max(compression_ratio, 1.0))
+            indices["storage_aware_mei"] = (psnr * log_compression) / storage_size_gb
+            
+            # Voxel Density Efficiency (VDE)
+            occupancy_ratio = octree_capacity / total_possible_voxels
+            indices["voxel_density_efficiency"] = (psnr * occupancy_ratio) / storage_size_gb
+            
+            # Helper metrics for analysis
+            indices["compression_ratio"] = compression_ratio
+            indices["occupancy_ratio"] = occupancy_ratio
+            indices["storage_size_gb"] = storage_size_gb
+            indices["total_possible_voxels"] = total_possible_voxels
         
         return indices
     

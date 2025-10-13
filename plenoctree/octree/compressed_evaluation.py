@@ -292,11 +292,17 @@ def main(unused_argv):
     # Capture final memory snapshot and calculate efficiency indices
     final_snapshot = memory_tracker.capture_snapshot(1)
     memory_metrics = memory_tracker.get_memory_metrics(final_snapshot)
+    # Get init_grid_depth from octree max_depth (since it's not a flag in compressed evaluation)
+    init_grid_depth = int(tree.max_depth) if hasattr(tree, 'max_depth') else None
+    
     efficiency_indices = memory_tracker.calculate_efficiency_indices(
         psnr=avg_psnr,
         ssim=avg_ssim,
         lpips=avg_lpips,
-        snapshot=final_snapshot
+        snapshot=final_snapshot,
+        octree_capacity=octree_capacity,
+        octree_file_size_mb=octree_file_size_mb,
+        init_grid_depth=init_grid_depth
     )
     
     # Enhanced evaluation metrics

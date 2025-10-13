@@ -378,7 +378,7 @@ def create_summary_comparison(logs_dir="logs", save_dir="plots"):
     save_path.mkdir(exist_ok=True)
     
     # Create comparison plots
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig, axes = plt.subplots(2, 2, figsize=(20, 14))
     fig.suptitle('Experiment Comparison - Final Test Metrics', fontsize=16, fontweight='bold')
     
     # PSNR comparison
@@ -387,7 +387,7 @@ def create_summary_comparison(logs_dir="logs", save_dir="plots"):
     axes[0, 0].set_ylabel('PSNR (dB)')
     axes[0, 0].set_title('Final Test PSNR')
     axes[0, 0].set_xticks(range(len(df_metrics)))
-    axes[0, 0].set_xticklabels(df_metrics['experiment'], rotation=45, ha='right')
+    axes[0, 0].set_xticklabels(df_metrics['experiment'], rotation=45, ha='center')
     axes[0, 0].grid(True, alpha=0.3)
     
     # Add value labels on bars
@@ -400,7 +400,7 @@ def create_summary_comparison(logs_dir="logs", save_dir="plots"):
     axes[0, 1].set_ylabel('SSIM')
     axes[0, 1].set_title('Final Test SSIM')
     axes[0, 1].set_xticks(range(len(df_metrics)))
-    axes[0, 1].set_xticklabels(df_metrics['experiment'], rotation=45, ha='right')
+    axes[0, 1].set_xticklabels(df_metrics['experiment'], rotation=45, ha='center')
     axes[0, 1].grid(True, alpha=0.3)
     
     # Add value labels on bars
@@ -413,7 +413,7 @@ def create_summary_comparison(logs_dir="logs", save_dir="plots"):
     axes[1, 0].set_ylabel('LPIPS')
     axes[1, 0].set_title('Final Test LPIPS (lower is better)')
     axes[1, 0].set_xticks(range(len(df_metrics)))
-    axes[1, 0].set_xticklabels(df_metrics['experiment'], rotation=45, ha='right')
+    axes[1, 0].set_xticklabels(df_metrics['experiment'], rotation=45, ha='center')
     axes[1, 0].grid(True, alpha=0.3)
     
     # Add value labels on bars
@@ -428,14 +428,14 @@ def create_summary_comparison(logs_dir="logs", save_dir="plots"):
         axes[1, 1].set_ylabel('Training Time (hours)')
         axes[1, 1].set_title('Total Training Time')
         axes[1, 1].set_xticks(range(len(df_time)))
-        axes[1, 1].set_xticklabels(df_time['experiment'], rotation=45, ha='right')
+        axes[1, 1].set_xticklabels(df_time['experiment'], rotation=45, ha='center')
         axes[1, 1].grid(True, alpha=0.3)
         
         # Add value labels on bars
         for i, v in enumerate(df_time['total_training_time']):
             axes[1, 1].text(i, v + 0.2, f'{v:.1f}h', ha='center', va='bottom')
     
-    plt.tight_layout()
+    plt.tight_layout(pad=3.0)
     
     # Save plot
     plot_filename = save_path / "experiment_comparison.png"
