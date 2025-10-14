@@ -17,6 +17,12 @@ import torch
 parser = argparse.ArgumentParser()
 parser.add_argument('render_dir', type=str)
 parser.add_argument('--crop', type=float, default=1.0, help='center crop')
+parser.add_argument('--advanced_metrics', action='store_true', 
+                    help='Compute advanced metrics (SMEI, FDR) from checkpoint')
+parser.add_argument('--checkpoint', type=str, default=None,
+                    help='Path to checkpoint.npz for advanced metrics (auto-detected if not provided)')
+parser.add_argument('--no_fdr', action='store_true',
+                    help='Skip FDR computation (memory intensive)')
 config_util.define_common_args(parser)
 args = parser.parse_args()
 
@@ -76,6 +82,64 @@ print('AVERAGES')
 print('PSNR:', avg_psnr)
 print('SSIM:', avg_ssim)
 print('LPIPS:', avg_lpips)
+
+# Compute advanced metrics if requested
+if args.advanced_metrics:
+    try:
+        from util.advanced_metrics import compute_all_advanced_metrics, print_advanced_metrics
+        import svox2
+        
+        # Find checkpoint file
+        checkpoint_path = args.checkpoint
+        if checkpoint_path is None:
+            # Try to auto-detect checkpoint in parent directory
+            parent_dir = path.dirname(args.render_dir)
+            potential_ckpts = glob(path.join(parent_dir, '*.npz'))
+            if potential_ckpts:
+                checkpoint_path = sorted(potential_ckpts)[-1]  # Use most recent
+                print(f'\nAuto-detected checkpoint: {checkpoint_path}')
+            else:
+                print('\nWarning: No checkpoint found. Use --checkpoint to specify path.')
+                checkpoint_path = None
+        
+        if checkpoint_path and path.exists(checkpoint_path):
+            print(f'\nLoading checkpoint for advanced metrics: {checkpoint_path}')
+            grid = svox2.SparseGrid.load(checkpoint_path, device=device)
+            print(f'Grid: {grid}')
+            
+            # Compute metrics
+            advanced_metrics = compute_all_advanced_metrics(
+                grid, 
+                avg_psnr,
+                use_fp16=False,  # svox2 uses FP32 by default
+                compute_fdr=not args.no_fdr,
+                verbose=True
+            )
+            
+            # Print results
+            print_advanced_metrics(advanced_metrics)
+            
+            # Save to file
+            postfix = '_cropped' if args.crop != 1.0 else ''
+            metrics_file = path.join(args.render_dir, f'advanced_metrics{postfix}.txt')
+            with open(metrics_file, 'w') as f:
+                f.write('=== Advanced Metrics ===\n')
+                f.write(f'SMEI: {advanced_metrics.get("SMEI", -1):.4f}\n')
+                f.write(f'FDR: {advanced_metrics.get("FDR", -1):.4f}\n')
+                f.write(f'Storage (MB): {advanced_metrics.get("SMEI_storage_mb", -1):.2f}\n')
+                f.write(f'Active Voxels: {advanced_metrics.get("SMEI_active_voxels", -1)}\n')
+                f.write(f'Sparsity: {advanced_metrics.get("SMEI_sparsity", -1):.2%}\n')
+                f.write(f'Compression Ratio: {advanced_metrics.get("SMEI_compression_ratio", -1):.2f}x\n')
+                if advanced_metrics.get("FDR", -1) >= 0:
+                    f.write(f'Num Floaters: {advanced_metrics.get("FDR_num_floaters", -1)}\n')
+                    f.write(f'Main Volume: {advanced_metrics.get("FDR_main_volume", -1)}\n')
+            print(f'Advanced metrics saved to: {metrics_file}')
+            
+    except Exception as e:
+        print(f'\nError computing advanced metrics: {e}')
+        import traceback
+        traceback.print_exc()
+
 postfix = '_cropped' if args.crop != 1.0 else ''
 #  with open(path.join(args.render_dir, f'psnr{postfix}.txt'), 'w') as f:
 #      f.write(str(avg_psnr))

@@ -161,6 +161,14 @@ group.add_argument('--log_mse_image', action='store_true', default=False)
 group.add_argument('--log_depth_map', action='store_true', default=False)
 group.add_argument('--log_depth_map_use_thresh', type=float, default=None,
         help="If specified, uses the Dex-neRF version of depth with given thresh; else returns expected term")
+group.add_argument('--log_advanced_metrics', action='store_true', default=False,
+        help="Log advanced metrics (SMEI, FDR) during training")
+group.add_argument('--advanced_metrics_every', type=int, default=5,
+        help="Log advanced metrics every N eval iterations (to reduce overhead)")
+group.add_argument('--log_fdr', action='store_true', default=False,
+        help="Enable FDR computation during training (expensive, ~500MB memory for 512^3 grids)")
+group.add_argument('--fdr_every', type=int, default=10,
+        help="Compute FDR every N eval iterations (should be >= advanced_metrics_every)")
 
 
 group = parser.add_argument_group("misc experiments")
@@ -466,6 +474,52 @@ while True:
                         stats_test[stat_name], global_step=gstep_id_base)
             summary_writer.add_scalar('epoch_id', float(epoch_id), global_step=gstep_id_base)
             print('eval stats:', stats_test)
+            
+            # Log advanced metrics if requested
+            if args.log_advanced_metrics and epoch_id % (max(factor, args.eval_every) * args.advanced_metrics_every) == 0:
+                try:
+                    from util.advanced_metrics import compute_all_advanced_metrics
+                    
+                    # Determine if we should compute FDR this iteration
+                    compute_fdr_now = (
+                        args.log_fdr and 
+                        epoch_id % (max(factor, args.eval_every) * args.fdr_every) == 0
+                    )
+                    
+                    if compute_fdr_now:
+                        print('Computing advanced metrics (SMEI + FDR)...')
+                        print('  Note: FDR computation may take 1-10 seconds and uses ~500MB memory for 512^3 grids')
+                    else:
+                        print('Computing advanced metrics (SMEI)...')
+                    
+                    advanced_metrics = compute_all_advanced_metrics(
+                        grid, 
+                        stats_test['psnr'],
+                        use_fp16=False,
+                        compute_fdr=compute_fdr_now,
+                        verbose=False
+                    )
+                    
+                    # Log SMEI metrics to tensorboard
+                    summary_writer.add_scalar("metrics/SMEI", advanced_metrics['SMEI'], global_step=gstep_id_base)
+                    summary_writer.add_scalar("metrics/storage_mb", advanced_metrics['SMEI_storage_mb'], global_step=gstep_id_base)
+                    summary_writer.add_scalar("metrics/active_voxels", advanced_metrics['SMEI_active_voxels'], global_step=gstep_id_base)
+                    summary_writer.add_scalar("metrics/sparsity", advanced_metrics['SMEI_sparsity'], global_step=gstep_id_base)
+                    summary_writer.add_scalar("metrics/compression_ratio", advanced_metrics['SMEI_compression_ratio'], global_step=gstep_id_base)
+                    
+                    # Log FDR metrics if computed
+                    if compute_fdr_now and advanced_metrics.get('FDR', -1) >= 0:
+                        summary_writer.add_scalar("metrics/FDR", advanced_metrics['FDR'], global_step=gstep_id_base)
+                        summary_writer.add_scalar("metrics/num_floaters", advanced_metrics['FDR_num_floaters'], global_step=gstep_id_base)
+                        summary_writer.add_scalar("metrics/num_components", advanced_metrics['FDR_num_components'], global_step=gstep_id_base)
+                        summary_writer.add_scalar("metrics/floater_volume", advanced_metrics['FDR_floater_volume'], global_step=gstep_id_base)
+                        print(f'  SMEI: {advanced_metrics["SMEI"]:.4f} | Storage: {advanced_metrics["SMEI_storage_mb"]:.2f} MB | Sparsity: {advanced_metrics["SMEI_sparsity"]:.2%}')
+                        print(f'  FDR: {advanced_metrics["FDR"]:.2%} | Floaters: {advanced_metrics["FDR_num_floaters"]} / {advanced_metrics["FDR_num_components"]} components')
+                    else:
+                        print(f'  SMEI: {advanced_metrics["SMEI"]:.4f} | Storage: {advanced_metrics["SMEI_storage_mb"]:.2f} MB | Sparsity: {advanced_metrics["SMEI_sparsity"]:.2%}')
+                        
+                except Exception as e:
+                    print(f'Warning: Failed to compute advanced metrics: {e}')
     if epoch_id % max(factor, args.eval_every) == 0: #and (epoch_id > 0 or not args.tune_mode):
         # NOTE: we do an eval sanity check, if not in tune_mode
         eval_step()
