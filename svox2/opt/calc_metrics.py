@@ -18,7 +18,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('render_dir', type=str)
 parser.add_argument('--crop', type=float, default=1.0, help='center crop')
 parser.add_argument('--advanced_metrics', action='store_true', 
-                    help='Compute advanced metrics (SMEI, FDR) from checkpoint')
+                    help='Compute advanced metrics (MCQ, FDR) from checkpoint')
 parser.add_argument('--checkpoint', type=str, default=None,
                     help='Path to checkpoint.npz for advanced metrics (auto-detected if not provided)')
 parser.add_argument('--no_fdr', action='store_true',
@@ -107,12 +107,27 @@ if args.advanced_metrics:
             grid = svox2.SparseGrid.load(checkpoint_path, device=device)
             print(f'Grid: {grid}')
             
+            # Track peak GPU memory for MCQ
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+                # Forward pass to get memory usage
+                dummy_cam = dset.c2w[0] if hasattr(dset, 'c2w') else None
+                if dummy_cam is not None:
+                    try:
+                        _ = grid.volume_render_fused(dummy_cam, dset.intrins[0] if hasattr(dset, 'intrins') else None)
+                    except:
+                        pass
+                peak_gpu_memory_mb = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+            else:
+                peak_gpu_memory_mb = None
+            
             # Compute metrics
             advanced_metrics = compute_all_advanced_metrics(
                 grid, 
                 avg_psnr,
                 use_fp16=False,  # svox2 uses FP32 by default
                 compute_fdr=not args.no_fdr,
+                peak_gpu_memory_mb=peak_gpu_memory_mb,
                 verbose=True
             )
             
@@ -124,15 +139,14 @@ if args.advanced_metrics:
             metrics_file = path.join(args.render_dir, f'advanced_metrics{postfix}.txt')
             with open(metrics_file, 'w') as f:
                 f.write('=== Advanced Metrics ===\n')
-                f.write(f'SMEI: {advanced_metrics.get("SMEI", -1):.4f}\n')
+                if 'MCQ' in advanced_metrics:
+                    f.write(f'MCQ: {advanced_metrics.get("MCQ", -1):.4f} GB/dB\n')
+                    f.write(f'Peak GPU Memory: {advanced_metrics.get("MCQ_peak_gpu_gb", -1):.2f} GB\n')
                 f.write(f'FDR: {advanced_metrics.get("FDR", -1):.4f}\n')
-                f.write(f'Storage (MB): {advanced_metrics.get("SMEI_storage_mb", -1):.2f}\n')
-                f.write(f'Active Voxels: {advanced_metrics.get("SMEI_active_voxels", -1)}\n')
-                f.write(f'Sparsity: {advanced_metrics.get("SMEI_sparsity", -1):.2%}\n')
-                f.write(f'Compression Ratio: {advanced_metrics.get("SMEI_compression_ratio", -1):.2f}x\n')
                 if advanced_metrics.get("FDR", -1) >= 0:
                     f.write(f'Num Floaters: {advanced_metrics.get("FDR_num_floaters", -1)}\n')
                     f.write(f'Main Volume: {advanced_metrics.get("FDR_main_volume", -1)}\n')
+                    f.write(f'Floater Volume: {advanced_metrics.get("FDR_floater_volume", -1)}\n')
             print(f'Advanced metrics saved to: {metrics_file}')
             
     except Exception as e:

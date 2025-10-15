@@ -2,18 +2,18 @@
 Advanced quality metrics for Plenoxels evaluation
 
 Implements:
-- SMEI (Sparse Memory Efficiency Index): Quality-memory tradeoff metric
+- MCQ (Memory Cost per Quality): GPU memory efficiency metric
 - FDR (Floater Detection Ratio): Ghosting artifacts quantification
 
 Usage:
-    from util.advanced_metrics import compute_SMEI, compute_FDR, compute_all_advanced_metrics
+    from util.advanced_metrics import compute_MCQ, compute_FDR, compute_all_advanced_metrics
     
     # Load grid
     grid = svox2.SparseGrid.load('checkpoint.npz')
     
-    # Compute SMEI (lightweight)
-    smei_results = compute_SMEI(grid, psnr=28.5, use_fp16=False)
-    print(f"SMEI: {smei_results['SMEI']:.4f}")
+    # Compute MCQ (requires peak GPU memory)
+    mcq_results = compute_MCQ(psnr=28.5, peak_gpu_memory_mb=2048.0)
+    print(f"MCQ: {mcq_results['MCQ']:.4f} GB/dB")
     
     # Compute FDR (more expensive)
     fdr_results = compute_FDR(grid, threshold=0.01)
@@ -33,6 +33,44 @@ except ImportError:
     warn("scipy not found. FDR metric will not be available. Install with: pip install scipy")
 
 
+def compute_MCQ(
+    psnr: float,
+    peak_gpu_memory_mb: float
+) -> Dict[str, float]:
+    """
+    Compute Memory Cost per Quality (MCQ)
+    
+    MCQ = Peak_GPU_Memory_GB / PSNR
+    
+    Measures how many GB of GPU memory needed per decibel of quality.
+    Lower is better (means more efficient).
+    
+    Args:
+        psnr: Peak signal-to-noise ratio from evaluation
+        peak_gpu_memory_mb: Peak GPU memory usage (MB)
+        
+    Returns:
+        Dictionary containing:
+            - MCQ: Memory cost per quality (GB/dB)
+            - peak_gpu_gb: Peak GPU memory in GB
+            - psnr: Input PSNR value
+            - memory_per_db: Same as MCQ (GB/dB)
+    """
+    # Convert memory to GB
+    peak_gpu_gb = peak_gpu_memory_mb / 1024.0
+    
+    # Compute MCQ
+    mcq = peak_gpu_gb / psnr if psnr > 0 else 0.0
+    
+    return {
+        'MCQ': mcq,
+        'peak_gpu_gb': peak_gpu_gb,
+        'peak_gpu_mb': peak_gpu_memory_mb,
+        'psnr': psnr,
+        'memory_per_db': mcq  # Alias for clarity
+    }
+
+
 def compute_SMEI(
     grid,
     psnr: float,
@@ -40,12 +78,14 @@ def compute_SMEI(
     include_basis: bool = False
 ) -> Dict[str, float]:
     """
+    [DEPRECATED] Use compute_MCQ() instead for runtime GPU efficiency.
+    
     Compute Sparse Memory Efficiency Index (SMEI)
     
     SMEI = (PSNR × Sparsity_Exploitation) / Storage_Size_MB
     
-    This metric captures the quality-memory tradeoff for sparse voxel grids.
-    Higher is better - indicates better quality per MB of storage.
+    This metric captures disk storage efficiency (not used in primary evaluation).
+    Higher is better - indicates better quality per MB of disk storage.
     
     Args:
         grid: SparseGrid instance from svox2
@@ -272,7 +312,11 @@ def compute_FDR(
         'total_volume': int(total_volume),
         'sparsity': float(sparsity),
         'largest_floater': int(largest_floater),
-        'mean_floater_size': float(mean_floater_size)
+        'mean_floater_size': float(mean_floater_size),
+        # Add floater mask for visualization
+        'floater_mask_3d': labeled,  # Full labeled array
+        'floater_component_ids': np.where(floater_mask)[0] + 1,  # Component IDs that are floaters
+        'main_component_id': main_component_idx + 1  # Main object ID
     }
 
 
@@ -282,6 +326,8 @@ def compute_all_advanced_metrics(
     use_fp16: bool = False,
     compute_fdr: bool = True,
     fdr_threshold: float = 0.01,
+    fdr_main_object_threshold: float = 0.1,
+    peak_gpu_memory_mb: float = None,
     verbose: bool = True
 ) -> Dict[str, float]:
     """
@@ -292,7 +338,9 @@ def compute_all_advanced_metrics(
         psnr: Peak signal-to-noise ratio from evaluation
         use_fp16: Whether model uses FP16 storage
         compute_fdr: Whether to compute FDR (more expensive)
-        fdr_threshold: Density threshold for FDR computation
+        fdr_threshold: Density threshold for FDR computation (default: 0.01)
+        fdr_main_object_threshold: Size ratio to distinguish main object from floaters (default: 0.1)
+        peak_gpu_memory_mb: Peak GPU memory (MB) - for MCQ computation
         verbose: Print progress messages
         
     Returns:
@@ -300,18 +348,23 @@ def compute_all_advanced_metrics(
     """
     results = {}
     
-    # Always compute SMEI (lightweight)
-    if verbose:
-        print("Computing SMEI...")
-    smei_results = compute_SMEI(grid, psnr, use_fp16=use_fp16)
-    results.update({f'SMEI_{k}': v for k, v in smei_results.items()})
-    results['SMEI'] = smei_results['SMEI']  # Also keep top-level SMEI
+    # Compute MCQ (Memory Cost per Quality) if GPU memory available
+    if peak_gpu_memory_mb is not None:
+        if verbose:
+            print("Computing MCQ...")
+        mcq_results = compute_MCQ(psnr, peak_gpu_memory_mb)
+        results.update({f'MCQ_{k}': v for k, v in mcq_results.items()})
+        results['MCQ'] = mcq_results['MCQ']
     
     # Optionally compute FDR (memory intensive)
     if compute_fdr and HAS_SCIPY:
         if verbose:
             print("Computing FDR...")
-        fdr_results = compute_FDR(grid, threshold=fdr_threshold)
+        fdr_results = compute_FDR(
+            grid, 
+            threshold=fdr_threshold,
+            main_object_threshold=fdr_main_object_threshold
+        )
         results.update({f'FDR_{k}': v for k, v in fdr_results.items()})
         results['FDR'] = fdr_results['FDR']  # Also keep top-level FDR
     elif compute_fdr and not HAS_SCIPY:
@@ -332,22 +385,16 @@ def print_advanced_metrics(metrics: Dict[str, float], indent: str = "  "):
     """
     print(f"\n{indent}=== Advanced Metrics ===")
     
-    # SMEI metrics
-    if 'SMEI' in metrics:
-        print(f"{indent}SMEI: {metrics['SMEI']:.4f}")
-        if 'SMEI_storage_mb' in metrics:
-            print(f"{indent}  Storage: {metrics['SMEI_storage_mb']:.2f} MB")
-            print(f"{indent}    - Data: {metrics['SMEI_storage_data_mb']:.2f} MB")
-            print(f"{indent}    - Index: {metrics['SMEI_storage_index_mb']:.2f} MB")
-        if 'SMEI_active_voxels' in metrics:
-            print(f"{indent}  Active voxels: {metrics['SMEI_active_voxels']:,}")
-            print(f"{indent}  Total capacity: {metrics['SMEI_total_capacity']:,}")
-            print(f"{indent}  Sparsity: {metrics['SMEI_sparsity']:.2%}")
-            print(f"{indent}  Compression: {metrics['SMEI_compression_ratio']:.2f}x")
+    # MCQ (Memory Cost per Quality)
+    if 'MCQ' in metrics:
+        print(f"{indent}MCQ (Memory Cost per Quality): {metrics['MCQ']:.4f} GB/dB")
+        print(f"{indent}  Peak GPU Memory: {metrics['MCQ_peak_gpu_gb']:.2f} GB")
+        print(f"{indent}  PSNR: {metrics['MCQ_psnr']:.2f} dB")
+        print(f"{indent}  Interpretation: {metrics['MCQ']:.3f} GB needed per dB of quality")
     
-    # FDR metrics
+    # FDR (Floater Detection Ratio)
     if 'FDR' in metrics and metrics['FDR'] >= 0:
-        print(f"{indent}FDR: {metrics['FDR']:.2%}")
+        print(f"{indent}FDR (Floater Detection Ratio): {metrics['FDR']:.2%}")
         if 'FDR_num_floaters' in metrics:
             print(f"{indent}  Floaters: {metrics['FDR_num_floaters']} / {metrics['FDR_num_components']} components")
             print(f"{indent}  Main volume: {metrics['FDR_main_volume']:,} voxels")

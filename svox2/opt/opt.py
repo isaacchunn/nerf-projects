@@ -29,6 +29,14 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from typing import NamedTuple, Optional, Union
 
+# Try to import psutil for system memory tracking
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+    warn("psutil not found. System memory tracking will be disabled. Install with: pip install psutil")
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 parser = argparse.ArgumentParser()
@@ -162,13 +170,23 @@ group.add_argument('--log_depth_map', action='store_true', default=False)
 group.add_argument('--log_depth_map_use_thresh', type=float, default=None,
         help="If specified, uses the Dex-neRF version of depth with given thresh; else returns expected term")
 group.add_argument('--log_advanced_metrics', action='store_true', default=False,
-        help="Log advanced metrics (SMEI, FDR) during training")
+        help="Log advanced metrics (MCQ, FDR) during training")
 group.add_argument('--advanced_metrics_every', type=int, default=5,
         help="Log advanced metrics every N eval iterations (to reduce overhead)")
 group.add_argument('--log_fdr', action='store_true', default=False,
         help="Enable FDR computation during training (expensive, ~500MB memory for 512^3 grids)")
 group.add_argument('--fdr_every', type=int, default=10,
         help="Compute FDR every N eval iterations (should be >= advanced_metrics_every)")
+group.add_argument('--log_floater_viz', action='store_true', default=False,
+        help="Log floater visualizations to TensorBoard (requires --log_fdr)")
+group.add_argument('--floater_viz_slices', type=int, default=3,
+        help="Number of slices per axis for floater visualization")
+group.add_argument('--fdr_density_threshold', type=float, default=0.01,
+        help="Density threshold for FDR floater detection (default: 0.01). Higher = fewer floaters detected")
+group.add_argument('--fdr_main_object_threshold', type=float, default=0.1,
+        help="Size ratio threshold for main object vs floaters (default: 0.1 = 10%%). Components < 10%% of main are floaters")
+group.add_argument('--log_density_render', action='store_true', default=False,
+        help="Log density field renders from test views (helps validate floater detection)")
 
 
 group = parser.add_argument_group("misc experiments")
@@ -385,6 +403,16 @@ while True:
         print('Eval step')
         with torch.no_grad():
             stats_test = {'psnr' : 0.0, 'mse' : 0.0}
+            
+            # Track peak GPU memory for MCQ computation
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+            
+            # For floater visualization
+            if args.log_floater_viz:
+                stats_test['cameras_for_viz'] = []
+                stats_test['renders_for_viz'] = []
+                stats_test['gt_images_for_viz'] = []
 
             # Standard set
             N_IMGS_TO_EVAL = min(20 if epoch_id > 0 else 5, dset_test.n_images)
@@ -419,6 +447,12 @@ while True:
                     img_pred.clamp_max_(1.0)
                     summary_writer.add_image(f'test/image_{img_id:04d}',
                             img_pred, global_step=gstep_id_base, dataformats='HWC')
+                    
+                    # Save for floater visualization (first 3 views)
+                    if args.log_floater_viz and len(stats_test['cameras_for_viz']) < 3:
+                        stats_test['cameras_for_viz'].append(cam)
+                        stats_test['renders_for_viz'].append(img_pred.numpy())
+                        stats_test['gt_images_for_viz'].append(rgb_gt_test.cpu().numpy())
                     if args.log_mse_image:
                         mse_img = all_mses / all_mses.max()
                         summary_writer.add_image(f'test/mse_map_{img_id:04d}',
@@ -469,11 +503,79 @@ while True:
 
             stats_test['mse'] /= n_images_gen
             stats_test['psnr'] /= n_images_gen
+            
+            # ============================================================
+            # COMPREHENSIVE MEMORY & SYSTEM METRICS
+            # ============================================================
+            
+            # GPU Memory Tracking
+            if torch.cuda.is_available():
+                # Current allocated memory by PyTorch tensors (in MB)
+                gpu_allocated_mb = torch.cuda.memory_allocated(device) / (1024 ** 2)
+                # Reserved memory by PyTorch (includes cached allocator, larger than allocated)
+                gpu_reserved_mb = torch.cuda.memory_reserved(device) / (1024 ** 2)
+                # Peak allocated memory since program start
+                gpu_max_allocated_mb = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+                
+                # Get total GPU memory and compute usage percentage
+                gpu_props = torch.cuda.get_device_properties(device)
+                gpu_total_mb = gpu_props.total_memory / (1024 ** 2)
+                gpu_usage_percent = (gpu_allocated_mb / gpu_total_mb) * 100
+                
+                # Log GPU metrics
+                summary_writer.add_scalar('memory_metrics/gpu_allocated_mb', gpu_allocated_mb, global_step=gstep_id_base)
+                summary_writer.add_scalar('memory_metrics/gpu_reserved_mb', gpu_reserved_mb, global_step=gstep_id_base)
+                summary_writer.add_scalar('memory_metrics/gpu_peak_mb', gpu_max_allocated_mb, global_step=gstep_id_base)
+                summary_writer.add_scalar('memory_metrics/gpu_total_mb', gpu_total_mb, global_step=gstep_id_base)
+                summary_writer.add_scalar('memory_metrics/gpu_usage_percent', gpu_usage_percent, global_step=gstep_id_base)
+                
+                # Add to stats for printing
+                stats_test['gpu_mem_mb'] = gpu_allocated_mb
+            
+            # System RAM & CPU Tracking
+            if HAS_PSUTIL:
+                # Process-specific memory (this Python process)
+                process = psutil.Process()
+                process_ram_mb = process.memory_info().rss / (1024 ** 2)  # Resident Set Size
+                process_ram_percent = process.memory_percent()
+                
+                # System-wide memory
+                ram = psutil.virtual_memory()
+                system_ram_total_mb = ram.total / (1024 ** 2)
+                system_ram_used_mb = ram.used / (1024 ** 2)
+                system_ram_available_mb = ram.available / (1024 ** 2)
+                system_ram_percent = ram.percent
+                
+                # CPU usage
+                cpu_percent = psutil.cpu_percent(interval=0.1)
+                cpu_count = psutil.cpu_count()
+                
+                # Log RAM metrics
+                summary_writer.add_scalar('memory_metrics/process_ram_mb', process_ram_mb, global_step=gstep_id_base)
+                summary_writer.add_scalar('memory_metrics/process_ram_percent', process_ram_percent, global_step=gstep_id_base)
+                summary_writer.add_scalar('memory_metrics/system_ram_used_mb', system_ram_used_mb, global_step=gstep_id_base)
+                summary_writer.add_scalar('memory_metrics/system_ram_available_mb', system_ram_available_mb, global_step=gstep_id_base)
+                summary_writer.add_scalar('memory_metrics/system_ram_percent', system_ram_percent, global_step=gstep_id_base)
+                
+                # Log CPU metrics
+                summary_writer.add_scalar('memory_metrics/cpu_percent', cpu_percent, global_step=gstep_id_base)
+                summary_writer.add_scalar('memory_metrics/cpu_count', cpu_count, global_step=gstep_id_base)
+                
+                # Add to stats for printing
+                stats_test['ram_mb'] = process_ram_mb
+                stats_test['cpu_percent'] = cpu_percent
+            
+            # Log scalar stats only (exclude visualization data)
             for stat_name in stats_test:
-                summary_writer.add_scalar('test/' + stat_name,
-                        stats_test[stat_name], global_step=gstep_id_base)
+                if stat_name not in ['cameras_for_viz', 'renders_for_viz', 'gt_images_for_viz']:
+                    summary_writer.add_scalar('test/' + stat_name,
+                            stats_test[stat_name], global_step=gstep_id_base)
             summary_writer.add_scalar('epoch_id', float(epoch_id), global_step=gstep_id_base)
-            print('eval stats:', stats_test)
+            
+            # Print stats (exclude viz data for cleaner output)
+            stats_to_print = {k: v for k, v in stats_test.items() 
+                            if k not in ['cameras_for_viz', 'renders_for_viz', 'gt_images_for_viz']}
+            print('eval stats:', stats_to_print)
             
             # Log advanced metrics if requested
             if args.log_advanced_metrics and epoch_id % (max(factor, args.eval_every) * args.advanced_metrics_every) == 0:
@@ -487,25 +589,30 @@ while True:
                     )
                     
                     if compute_fdr_now:
-                        print('Computing advanced metrics (SMEI + FDR)...')
+                        print('Computing advanced metrics (MCQ + FDR)...')
                         print('  Note: FDR computation may take 1-10 seconds and uses ~500MB memory for 512^3 grids')
                     else:
-                        print('Computing advanced metrics (SMEI)...')
+                        print('Computing advanced metrics (MCQ)...')
+                    
+                    # Get peak GPU memory for MCQ
+                    peak_gpu_memory_mb = torch.cuda.max_memory_allocated(device) / (1024 ** 2) if torch.cuda.is_available() else None
                     
                     advanced_metrics = compute_all_advanced_metrics(
                         grid, 
                         stats_test['psnr'],
                         use_fp16=False,
                         compute_fdr=compute_fdr_now,
+                        fdr_threshold=args.fdr_density_threshold,
+                        fdr_main_object_threshold=args.fdr_main_object_threshold,
+                        peak_gpu_memory_mb=peak_gpu_memory_mb,
                         verbose=False
                     )
                     
-                    # Log SMEI metrics to tensorboard
-                    summary_writer.add_scalar("metrics/SMEI", advanced_metrics['SMEI'], global_step=gstep_id_base)
-                    summary_writer.add_scalar("metrics/storage_mb", advanced_metrics['SMEI_storage_mb'], global_step=gstep_id_base)
-                    summary_writer.add_scalar("metrics/active_voxels", advanced_metrics['SMEI_active_voxels'], global_step=gstep_id_base)
-                    summary_writer.add_scalar("metrics/sparsity", advanced_metrics['SMEI_sparsity'], global_step=gstep_id_base)
-                    summary_writer.add_scalar("metrics/compression_ratio", advanced_metrics['SMEI_compression_ratio'], global_step=gstep_id_base)
+                    # Log MCQ (Memory Cost per Quality)
+                    if 'MCQ' in advanced_metrics:
+                        summary_writer.add_scalar("metrics/MCQ", advanced_metrics['MCQ'], global_step=gstep_id_base)
+                        summary_writer.add_scalar("metrics/peak_gpu_gb", advanced_metrics['MCQ_peak_gpu_gb'], global_step=gstep_id_base)
+                        summary_writer.add_scalar("metrics/memory_per_db", advanced_metrics['MCQ_memory_per_db'], global_step=gstep_id_base)
                     
                     # Log FDR metrics if computed
                     if compute_fdr_now and advanced_metrics.get('FDR', -1) >= 0:
@@ -513,10 +620,35 @@ while True:
                         summary_writer.add_scalar("metrics/num_floaters", advanced_metrics['FDR_num_floaters'], global_step=gstep_id_base)
                         summary_writer.add_scalar("metrics/num_components", advanced_metrics['FDR_num_components'], global_step=gstep_id_base)
                         summary_writer.add_scalar("metrics/floater_volume", advanced_metrics['FDR_floater_volume'], global_step=gstep_id_base)
-                        print(f'  SMEI: {advanced_metrics["SMEI"]:.4f} | Storage: {advanced_metrics["SMEI_storage_mb"]:.2f} MB | Sparsity: {advanced_metrics["SMEI_sparsity"]:.2%}')
+                        
+                        # Print metrics
+                        if 'MCQ' in advanced_metrics:
+                            print(f'  MCQ: {advanced_metrics["MCQ"]:.4f} GB/dB | Peak GPU: {advanced_metrics["MCQ_peak_gpu_gb"]:.2f} GB')
                         print(f'  FDR: {advanced_metrics["FDR"]:.2%} | Floaters: {advanced_metrics["FDR_num_floaters"]} / {advanced_metrics["FDR_num_components"]} components')
+                        
+                        # Visualize floaters if requested
+                        if args.log_floater_viz:
+                            try:
+                                from util.floater_visualization import log_floater_visualizations_to_tensorboard
+                                print('  Creating floater visualizations...')
+                                # Note: 'cameras_for_viz' and 'renders_for_viz' should be populated in eval_step
+                                log_floater_visualizations_to_tensorboard(
+                                    summary_writer,
+                                    grid,
+                                    advanced_metrics,  # Contains FDR results with floater mask
+                                    global_step=gstep_id_base,
+                                    n_slices=args.floater_viz_slices,
+                                    cameras=stats_test.get('cameras_for_viz', None),
+                                    rendered_images=stats_test.get('renders_for_viz', None),
+                                    gt_images=stats_test.get('gt_images_for_viz', None),
+                                    max_render_views=3,
+                                    log_density_renders=args.log_density_render
+                                )
+                            except Exception as e:
+                                print(f'  Warning: Failed to create floater visualizations: {e}')
                     else:
-                        print(f'  SMEI: {advanced_metrics["SMEI"]:.4f} | Storage: {advanced_metrics["SMEI_storage_mb"]:.2f} MB | Sparsity: {advanced_metrics["SMEI_sparsity"]:.2%}')
+                        if 'MCQ' in advanced_metrics:
+                            print(f'  MCQ: {advanced_metrics["MCQ"]:.4f} GB/dB | Peak GPU: {advanced_metrics["MCQ_peak_gpu_gb"]:.2f} GB')
                         
                 except Exception as e:
                     print(f'Warning: Failed to compute advanced metrics: {e}')
@@ -566,8 +698,47 @@ while True:
             stats['invsqr_mse'] += 1.0 / mse_num ** 2
 
             if (iter_id + 1) % args.print_every == 0:
-                # Print averaged stats
-                pbar.set_description(f'epoch {epoch_id} psnr={psnr:.2f}')
+                # ============================================================
+                # COMPREHENSIVE MEMORY TRACKING (TRAINING LOOP)
+                # ============================================================
+                
+                # GPU Memory
+                if torch.cuda.is_available():
+                    gpu_mem_allocated = torch.cuda.memory_allocated(device) / (1024 ** 2)
+                    gpu_mem_reserved = torch.cuda.memory_reserved(device) / (1024 ** 2)
+                    gpu_mem_peak = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+                    
+                    gpu_props = torch.cuda.get_device_properties(device)
+                    gpu_total_mb = gpu_props.total_memory / (1024 ** 2)
+                    gpu_usage_percent = (gpu_mem_allocated / gpu_total_mb) * 100
+                    
+                    summary_writer.add_scalar('memory_metrics/train_gpu_allocated_mb', gpu_mem_allocated, global_step=gstep_id)
+                    summary_writer.add_scalar('memory_metrics/train_gpu_reserved_mb', gpu_mem_reserved, global_step=gstep_id)
+                    summary_writer.add_scalar('memory_metrics/train_gpu_peak_mb', gpu_mem_peak, global_step=gstep_id)
+                    summary_writer.add_scalar('memory_metrics/train_gpu_usage_percent', gpu_usage_percent, global_step=gstep_id)
+                
+                # System RAM & CPU
+                if HAS_PSUTIL:
+                    process = psutil.Process()
+                    process_ram_mb = process.memory_info().rss / (1024 ** 2)
+                    process_ram_percent = process.memory_percent()
+                    
+                    ram = psutil.virtual_memory()
+                    system_ram_percent = ram.percent
+                    cpu_percent = psutil.cpu_percent(interval=0)
+                    
+                    summary_writer.add_scalar('memory_metrics/train_process_ram_mb', process_ram_mb, global_step=gstep_id)
+                    summary_writer.add_scalar('memory_metrics/train_process_ram_percent', process_ram_percent, global_step=gstep_id)
+                    summary_writer.add_scalar('memory_metrics/train_system_ram_percent', system_ram_percent, global_step=gstep_id)
+                    summary_writer.add_scalar('memory_metrics/train_cpu_percent', cpu_percent, global_step=gstep_id)
+                    
+                    # Enhanced progress bar
+                    pbar.set_description(f'epoch {epoch_id} psnr={psnr:.2f} gpu={gpu_mem_allocated:.0f}MB ram={process_ram_mb:.0f}MB cpu={cpu_percent:.0f}%')
+                elif torch.cuda.is_available():
+                    pbar.set_description(f'epoch {epoch_id} psnr={psnr:.2f} gpu={gpu_mem_allocated:.0f}MB')
+                else:
+                    pbar.set_description(f'epoch {epoch_id} psnr={psnr:.2f}')
+                
                 for stat_name in stats:
                     stat_val = stats[stat_name] / args.print_every
                     summary_writer.add_scalar(stat_name, stat_val, global_step=gstep_id)
