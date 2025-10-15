@@ -155,9 +155,26 @@ if args.advanced_metrics:
         traceback.print_exc()
 
 postfix = '_cropped' if args.crop != 1.0 else ''
-#  with open(path.join(args.render_dir, f'psnr{postfix}.txt'), 'w') as f:
-#      f.write(str(avg_psnr))
-#  with open(path.join(args.render_dir, f'ssim{postfix}.txt'), 'w') as f:
-#      f.write(str(avg_ssim))
-#  with open(path.join(args.render_dir, f'lpips{postfix}.txt'), 'w') as f:
-#      f.write(str(avg_lpips))
+
+# Save individual metric files
+with open(path.join(args.render_dir, f'psnr{postfix}.txt'), 'w') as f:
+    f.write(f'{avg_psnr:.4f}\n')
+with open(path.join(args.render_dir, f'ssim{postfix}.txt'), 'w') as f:
+    f.write(f'{avg_ssim:.4f}\n')
+with open(path.join(args.render_dir, f'lpips{postfix}.txt'), 'w') as f:
+    f.write(f'{avg_lpips:.4f}\n')
+
+# Save comprehensive metrics summary
+metrics_summary_file = path.join(args.render_dir, f'metrics_summary{postfix}.txt')
+with open(metrics_summary_file, 'w') as f:
+    f.write('=== Image Quality Metrics ===\n')
+    f.write(f'PSNR:  {avg_psnr:.4f} dB\n')
+    f.write(f'SSIM:  {avg_ssim:.4f}\n')
+    f.write(f'LPIPS: {avg_lpips:.4f}\n')
+    f.write(f'\nNumber of test images: {n_images_gen}\n')
+
+print(f'\nMetrics saved to: {args.render_dir}/')
+print(f'  - psnr{postfix}.txt')
+print(f'  - ssim{postfix}.txt')
+print(f'  - lpips{postfix}.txt')
+print(f'  - metrics_summary{postfix}.txt')
