@@ -603,9 +603,12 @@ while True:
                         use_fp16=False,
                         compute_fdr=compute_fdr_now,
                         fdr_threshold=args.fdr_density_threshold,
-                        fdr_main_object_threshold=args.fdr_main_object_threshold,
+                        fdr_min_object_size=getattr(args, 'fdr_min_object_size', 500),  # Simple threshold: <500 = floater
+                        fdr_size_gap_ratio=getattr(args, 'fdr_size_gap_ratio', 0.25),
+                        fdr_use_adaptive=False,  # Use simple threshold method - more reliable!
+                        fdr_connectivity=26,
                         peak_gpu_memory_mb=peak_gpu_memory_mb,
-                        verbose=False
+                        verbose=True
                     )
                     
                     # Log MCQ (Memory Cost per Quality)
@@ -619,9 +622,20 @@ while True:
                         summary_writer.add_scalar("metrics/FDR", advanced_metrics['FDR'], global_step=gstep_id_base)
                         summary_writer.add_scalar("metrics/num_floaters", advanced_metrics['FDR_num_floaters'], global_step=gstep_id_base)
                         summary_writer.add_scalar("metrics/num_components", advanced_metrics['FDR_num_components'], global_step=gstep_id_base)
+                        summary_writer.add_scalar("metrics/num_main_objects", advanced_metrics.get('FDR_num_main_objects', 1), global_step=gstep_id_base)
                         summary_writer.add_scalar("metrics/floater_volume", advanced_metrics['FDR_floater_volume'], global_step=gstep_id_base)
                         
-                        # Print metrics
+                        # Print detailed metrics for debugging
+                        print(f"  FDR Detection Details:")
+                        print(f"    Method: {advanced_metrics.get('FDR_detection_method', 'unknown')}")
+                        print(f"    Total components: {advanced_metrics['FDR_num_components']}")
+                        print(f"    Main objects: {advanced_metrics.get('FDR_num_main_objects', 1)}")
+                        print(f"    Floaters: {advanced_metrics['FDR_num_floaters']}")
+                        print(f"    Main volume: {advanced_metrics['FDR_main_volume']:,} voxels ({advanced_metrics['FDR_main_volume']/advanced_metrics['FDR_total_volume']*100:.1f}%)")
+                        print(f"    Floater volume: {advanced_metrics['FDR_floater_volume']:,} voxels ({advanced_metrics['FDR']:.2%})")
+                        if advanced_metrics['FDR_num_floaters'] > 0:
+                            print(f"    Largest floater: {advanced_metrics.get('FDR_largest_floater', 0):,} voxels")
+                            print(f"    Mean floater size: {advanced_metrics.get('FDR_mean_floater_size', 0):.1f} voxels")
                         if 'MCQ' in advanced_metrics:
                             print(f'  MCQ: {advanced_metrics["MCQ"]:.4f} GB/dB | Peak GPU: {advanced_metrics["MCQ_peak_gpu_gb"]:.2f} GB')
                         print(f'  FDR: {advanced_metrics["FDR"]:.2%} | Floaters: {advanced_metrics["FDR_num_floaters"]} / {advanced_metrics["FDR_num_components"]} components')
@@ -637,12 +651,12 @@ while True:
                                     grid,
                                     advanced_metrics,  # Contains FDR results with floater mask
                                     global_step=gstep_id_base,
-                                    n_slices=args.floater_viz_slices,
                                     cameras=stats_test.get('cameras_for_viz', None),
                                     rendered_images=stats_test.get('renders_for_viz', None),
                                     gt_images=stats_test.get('gt_images_for_viz', None),
                                     max_render_views=3,
-                                    log_density_renders=args.log_density_render
+                                    log_density_renders=args.log_density_render,
+                                    max_voxels_per_object=200000  # Increased for better coverage
                                 )
                             except Exception as e:
                                 print(f'  Warning: Failed to create floater visualizations: {e}')

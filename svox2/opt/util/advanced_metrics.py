@@ -168,9 +168,14 @@ def compute_SMEI(
 def compute_FDR(
     grid,
     threshold: float = 0.01,
-    main_object_threshold: float = 0.1,
+    main_object_threshold: float = 0.05,
     use_density_threshold: bool = True,
-    max_resolution: Optional[Tuple[int, int, int]] = None
+    max_resolution: Optional[Tuple[int, int, int]] = None,
+    min_object_size: int = 1000,
+    size_gap_ratio: float = 0.2,
+    use_adaptive: bool = True,
+    connectivity: int = 26,
+    verbose: bool = False
 ) -> Dict[str, float]:
     """
     Compute Floater Detection Ratio (FDR)
@@ -182,10 +187,24 @@ def compute_FDR(
         grid: SparseGrid instance from svox2
         threshold: Minimum density to consider voxel occupied (default: 0.01)
         main_object_threshold: Volume ratio to distinguish floaters from main object
-                               (default: 0.1 means components < 10% of main are floaters)
+                               (default: 0.05 means components < 5% of main are floaters)
+                               Only used if use_adaptive=False
         use_density_threshold: If True, threshold by density; if False, use occupancy only
         max_resolution: If provided, downsample grid to this resolution before analysis
                        to save memory. Format: (x, y, z)
+        min_object_size: Absolute minimum size (voxels) for a component to be considered
+                        a real object. Components smaller than this are always floaters.
+                        (default: 1000)
+        size_gap_ratio: For adaptive mode, ratio threshold to detect gaps between
+                       real objects and floaters. If component[i+1]/component[i] < this,
+                       a gap is detected. (default: 0.2 = 20%)
+        use_adaptive: If True, use adaptive gap detection to identify floaters.
+                     If False, use simple relative threshold (backward compatible).
+                     (default: True)
+        connectivity: Connectivity for 3D connected components (default: 26)
+                     - 6: Face-adjacent only (most restrictive)
+                     - 18: Face + edge adjacent
+                     - 26: Face + edge + corner adjacent (most permissive, recommended)
     
     Returns:
         Dictionary containing:
@@ -198,6 +217,8 @@ def compute_FDR(
             - sparsity: Grid sparsity ratio
             - largest_floater: Volume of largest floater component
             - mean_floater_size: Mean volume of floater components
+            - num_main_objects: Number of components identified as main objects
+            - detection_method: String indicating which method was used
     """
     if not HAS_SCIPY:
         warn("scipy not available. FDR computation requires scipy.ndimage. Returning dummy values.")
@@ -248,8 +269,23 @@ def compute_FDR(
         # Just use occupancy (any active voxel)
         occupied = active_mask.numpy().astype(np.uint8)
     
-    # Connected component analysis
-    labeled, num_components = ndimage.label(occupied)
+    # Connected component analysis with configurable connectivity
+    # Create structure for desired connectivity
+    if connectivity == 26:
+        # 26-connectivity: all neighbors (face, edge, corner)
+        structure = np.ones((3, 3, 3), dtype=np.uint8)
+    elif connectivity == 18:
+        # 18-connectivity: face + edge neighbors only
+        structure = np.array([[[0,0,0], [0,1,0], [0,0,0]],
+                              [[0,1,0], [1,1,1], [0,1,0]],
+                              [[0,0,0], [0,1,0], [0,0,0]]], dtype=np.uint8)
+    elif connectivity == 6:
+        # 6-connectivity: face neighbors only (scipy default)
+        structure = None  # Use default
+    else:
+        raise ValueError(f"Invalid connectivity: {connectivity}. Must be 6, 18, or 26.")
+    
+    labeled, num_components = ndimage.label(occupied, structure=structure)
     
     if num_components == 0:
         # No occupied voxels
@@ -269,25 +305,105 @@ def compute_FDR(
     component_volumes = ndimage.sum(occupied, labeled, range(1, num_components + 1))
     component_volumes = np.array(component_volumes)
     
-    # Identify main object (largest component)
-    main_volume = np.max(component_volumes)
-    main_component_idx = np.argmax(component_volumes)
+    # Sort components by size (descending)
+    sorted_indices = np.argsort(component_volumes)[::-1]
+    sorted_volumes = component_volumes[sorted_indices]
     
-    # Identify floaters (components significantly smaller than main object)
-    floater_mask = component_volumes < (main_volume * main_object_threshold)
+    # Debug: Print top component sizes for diagnostic
+    if verbose:
+        print(f"    Component size distribution (top 20):")
+        for i, vol in enumerate(sorted_volumes[:20]):
+            if i < 10 or (i < 20 and vol >= min_object_size):
+                percent = (vol / np.sum(sorted_volumes)) * 100
+                print(f"      #{i+1}: {vol:,} voxels ({percent:.1f}%)", end="")
+                if i > 0:
+                    ratio = vol / sorted_volumes[i-1]
+                    print(f" | ratio: {ratio:.3f}")
+                else:
+                    print()
+        
+        # Show distribution statistics
+        print(f"    Total voxels: {np.sum(sorted_volumes):,}")
+        print(f"    Total components: {len(sorted_volumes)}")
+        if len(sorted_volumes) > 10:
+            top10_volume = np.sum(sorted_volumes[:10])
+            top10_percent = (top10_volume / np.sum(sorted_volumes)) * 100
+            print(f"    Top 10 components: {top10_volume:,} voxels ({top10_percent:.1f}%)")
+        if len(sorted_volumes) > 100:
+            tail_volume = np.sum(sorted_volumes[100:])
+            tail_percent = (tail_volume / np.sum(sorted_volumes)) * 100
+            print(f"    Components #101+: {tail_volume:,} voxels ({tail_percent:.1f}%) - likely floaters")
     
-    # Exclude the main component from floater consideration
-    if not floater_mask[main_component_idx]:
-        # Main component is not considered a floater (as expected)
-        pass
+    # Identify floaters using adaptive or threshold-based method
+    detection_method = ""
+    
+    if use_adaptive:
+        # ADAPTIVE METHOD: Find natural gaps in component sizes
+        # Use sorted order for analysis, then map back to original indices
+        floater_mask_sorted = np.zeros(len(sorted_volumes), dtype=bool)
+        num_main_objects = 0
+        
+        # Step 1: Mark components below absolute minimum as floaters
+        too_small_mask_sorted = sorted_volumes < min_object_size
+        floater_mask_sorted |= too_small_mask_sorted
+        
+        # Step 2: Find size gap among components larger than min_object_size
+        large_enough_mask = sorted_volumes >= min_object_size
+        large_enough_volumes = sorted_volumes[large_enough_mask]
+        
+        if len(large_enough_volumes) > 1:
+            # Look for the first significant gap in sizes
+            # Gap = ratio between consecutive components
+            ratios = large_enough_volumes[1:] / large_enough_volumes[:-1]
+            gap_indices = np.where(ratios < size_gap_ratio)[0]
+            
+            if len(gap_indices) > 0:
+                # Found a gap! Everything after the first gap is a floater
+                first_gap_idx = gap_indices[0]
+                num_main_objects = first_gap_idx + 1  # Components before gap
+                
+                # Mark everything after the gap as floaters (in sorted order)
+                large_enough_positions = np.where(large_enough_mask)[0]
+                floater_positions_after_gap = large_enough_positions[first_gap_idx + 1:]
+                floater_mask_sorted[floater_positions_after_gap] = True
+                
+                detection_method = f"adaptive_gap (gap after {num_main_objects} objects, ratio={ratios[first_gap_idx]:.3f})"
+            else:
+                # No significant gap found - all large components are main objects
+                num_main_objects = len(large_enough_volumes)
+                detection_method = f"adaptive_nogap ({num_main_objects} main objects, no clear gap)"
+        else:
+            # Only 0 or 1 large component
+            num_main_objects = len(large_enough_volumes)
+            detection_method = f"adaptive_single ({num_main_objects} main objects)"
+        
+        # Map sorted floater mask back to original component order
+        floater_mask = np.zeros(len(component_volumes), dtype=bool)
+        floater_mask[sorted_indices] = floater_mask_sorted
+        
+        # Count components marked as floaters by absolute size
+        num_too_small = too_small_mask_sorted.sum()
+        if num_too_small > 0:
+            detection_method += f" + {num_too_small} below min_size"
+    
     else:
-        # This shouldn't happen since main component is largest
-        floater_mask[main_component_idx] = False
+        # SIMPLE THRESHOLD METHOD: Any component >= min_object_size is a "main object"
+        # This is the most straightforward and reliable approach
+        floater_mask = component_volumes < min_object_size
+        num_main_objects = np.sum(~floater_mask)
+        
+        detection_method = f"simple_threshold (min_size={min_object_size}, {num_main_objects} objects >= threshold)"
     
     # Compute floater statistics
     floater_volumes = component_volumes[floater_mask]
     floater_volume = np.sum(floater_volumes)
     num_floaters = np.sum(floater_mask)
+    
+    # Main object statistics
+    main_object_mask = ~floater_mask
+    main_volumes = component_volumes[main_object_mask]
+    main_volume = np.sum(main_volumes) if len(main_volumes) > 0 else 0
+    largest_main_volume = np.max(main_volumes) if len(main_volumes) > 0 else 0
     
     # Total volume
     total_volume = np.sum(component_volumes)
@@ -303,20 +419,51 @@ def compute_FDR(
     total_capacity = int(np.prod(reso))
     sparsity = 1.0 - (total_volume / total_capacity)
     
+    # Get IDs of main objects and floaters
+    main_component_ids = np.where(main_object_mask)[0] + 1
+    floater_component_ids = np.where(floater_mask)[0] + 1
+    
+    # Compute spatial compactness for validation
+    # Compact objects have high density in their bounding box
+    main_compactness_scores = []
+    if verbose and len(main_component_ids) > 0:
+        print(f"    Main object compactness (voxels/bbox_volume):")
+        for i, comp_id in enumerate(main_component_ids[:8]):
+            comp_mask = (labeled == comp_id)
+            coords = np.where(comp_mask)
+            if len(coords[0]) > 0:
+                # Bounding box volume
+                bbox_vol = np.prod([coords[j].max() - coords[j].min() + 1 for j in range(3)])
+                obj_vol = len(coords[0])
+                compactness = obj_vol / bbox_vol if bbox_vol > 0 else 0
+                main_compactness_scores.append(compactness)
+                if i < 5 or obj_vol >= min_object_size * 2:  # Show top 5 or large objects
+                    print(f"      Object #{i+1}: {compactness:.3f} ({obj_vol:,} voxels)")
+        
+        if len(main_compactness_scores) > 0:
+            avg_compactness = np.mean(main_compactness_scores)
+            print(f"    Average main object compactness: {avg_compactness:.3f}")
+            if avg_compactness < 0.1:
+                print(f"    ⚠️  WARNING: Low compactness suggests scattered components, not solid objects!")
+    
     return {
         'FDR': float(FDR),
         'num_floaters': int(num_floaters),
         'num_components': int(num_components),
+        'num_main_objects': int(num_main_objects),
         'main_volume': int(main_volume),
+        'largest_main_volume': int(largest_main_volume),
         'floater_volume': int(floater_volume),
         'total_volume': int(total_volume),
         'sparsity': float(sparsity),
         'largest_floater': int(largest_floater),
         'mean_floater_size': float(mean_floater_size),
+        'detection_method': detection_method,
+        'connectivity': connectivity,
         # Add floater mask for visualization
         'floater_mask_3d': labeled,  # Full labeled array
-        'floater_component_ids': np.where(floater_mask)[0] + 1,  # Component IDs that are floaters
-        'main_component_id': main_component_idx + 1  # Main object ID
+        'floater_component_ids': floater_component_ids,  # Component IDs that are floaters
+        'main_component_ids': main_component_ids  # All main object IDs (not just largest)
     }
 
 
@@ -327,6 +474,10 @@ def compute_all_advanced_metrics(
     compute_fdr: bool = True,
     fdr_threshold: float = 0.01,
     fdr_main_object_threshold: float = 0.1,
+    fdr_min_object_size: int = 1000,
+    fdr_size_gap_ratio: float = 0.2,
+    fdr_use_adaptive: bool = True,
+    fdr_connectivity: int = 26,
     peak_gpu_memory_mb: float = None,
     verbose: bool = True
 ) -> Dict[str, float]:
@@ -340,6 +491,11 @@ def compute_all_advanced_metrics(
         compute_fdr: Whether to compute FDR (more expensive)
         fdr_threshold: Density threshold for FDR computation (default: 0.01)
         fdr_main_object_threshold: Size ratio to distinguish main object from floaters (default: 0.1)
+                                   Only used if fdr_use_adaptive=False
+        fdr_min_object_size: Absolute minimum size for real objects (default: 1000)
+        fdr_size_gap_ratio: Gap ratio for adaptive detection (default: 0.2)
+        fdr_use_adaptive: Use adaptive gap detection (default: True)
+        fdr_connectivity: Connectivity for 3D components - 6, 18, or 26 (default: 26)
         peak_gpu_memory_mb: Peak GPU memory (MB) - for MCQ computation
         verbose: Print progress messages
         
@@ -363,7 +519,12 @@ def compute_all_advanced_metrics(
         fdr_results = compute_FDR(
             grid, 
             threshold=fdr_threshold,
-            main_object_threshold=fdr_main_object_threshold
+            main_object_threshold=fdr_main_object_threshold,
+            min_object_size=fdr_min_object_size,
+            size_gap_ratio=fdr_size_gap_ratio,
+            use_adaptive=fdr_use_adaptive,
+            connectivity=fdr_connectivity,
+            verbose=verbose
         )
         results.update({f'FDR_{k}': v for k, v in fdr_results.items()})
         results['FDR'] = fdr_results['FDR']  # Also keep top-level FDR
@@ -396,9 +557,11 @@ def print_advanced_metrics(metrics: Dict[str, float], indent: str = "  "):
     if 'FDR' in metrics and metrics['FDR'] >= 0:
         print(f"{indent}FDR (Floater Detection Ratio): {metrics['FDR']:.2%}")
         if 'FDR_num_floaters' in metrics:
-            print(f"{indent}  Floaters: {metrics['FDR_num_floaters']} / {metrics['FDR_num_components']} components")
-            print(f"{indent}  Main volume: {metrics['FDR_main_volume']:,} voxels")
-            print(f"{indent}  Floater volume: {metrics['FDR_floater_volume']:,} voxels")
+            print(f"{indent}  Detection: {metrics.get('FDR_detection_method', 'unknown')}")
+            print(f"{indent}  Connectivity: {metrics.get('FDR_connectivity', 'unknown')}-connectivity")
+            print(f"{indent}  Components: {metrics['FDR_num_floaters']} floaters + {metrics.get('FDR_num_main_objects', 1)} main objects = {metrics['FDR_num_components']} total")
+            print(f"{indent}  Main volume: {metrics['FDR_main_volume']:,} voxels ({metrics['FDR_main_volume']/metrics['FDR_total_volume']*100:.1f}%)")
+            print(f"{indent}  Floater volume: {metrics['FDR_floater_volume']:,} voxels ({metrics['FDR']:.2%})")
             if metrics['FDR_num_floaters'] > 0:
                 print(f"{indent}  Largest floater: {metrics['FDR_largest_floater']:,} voxels")
                 print(f"{indent}  Mean floater size: {metrics['FDR_mean_floater_size']:.1f} voxels")

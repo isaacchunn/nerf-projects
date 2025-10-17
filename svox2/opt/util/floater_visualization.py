@@ -1,7 +1,10 @@
 """
 Floater visualization utilities for TensorBoard logging
 
-This module helps visualize ghosting artifacts (floaters) detected by FDR.
+Provides visualization functions for FDR (Floater Detection Ratio) analysis:
+- Multi-object detection with unique colors per object
+- Floater overlay on rendered views
+- Grid structure visualization
 """
 
 import torch
@@ -10,205 +13,66 @@ from typing import Optional, List, Tuple, Dict
 import cv2
 
 
+# ============================================================================
+# Core Visualization Functions
+# ============================================================================
+
+
 def create_floater_overlay_grid(grid, fdr_results, highlight_color=(255, 0, 0)):
-    """
-    Create a modified density grid that highlights floaters
-    
-    Args:
-        grid: SparseGrid instance
-        fdr_results: Results from compute_FDR containing floater mask
-        highlight_color: RGB color for floaters (default: red)
-        
-    Returns:
-        floater_mask: Boolean tensor indicating floater voxels
-        floater_coords: Nx3 tensor of floater voxel coordinates
-    """
+    """Extract floater voxel coordinates from FDR results"""
     if 'FDR_floater_mask_3d' not in fdr_results:
         return None, None
     
     labeled = fdr_results['FDR_floater_mask_3d']
     floater_ids = fdr_results['FDR_floater_component_ids']
-    
-    # Create boolean mask for floater voxels
     floater_mask_3d = np.isin(labeled, floater_ids)
-    
-    # Get coordinates of floater voxels
     floater_coords = np.stack(np.where(floater_mask_3d), axis=-1)
     
     return torch.from_numpy(floater_mask_3d), torch.from_numpy(floater_coords)
 
 
-def render_floater_heatmap(grid, fdr_results, camera, render_func):
-    """
-    Render a view with floaters highlighted in a heatmap overlay
-    
-    Args:
-        grid: SparseGrid instance
-        fdr_results: Results from compute_FDR
-        camera: Camera object for rendering
-        render_func: Function to render images (from grid)
-        
-    Returns:
-        rgb_with_overlay: Image with floater overlay [H, W, 3]
-        floater_density: Floater-only rendering [H, W]
-    """
-    # Get floater mask
-    floater_mask, floater_coords = create_floater_overlay_grid(grid, fdr_results)
-    
-    if floater_mask is None:
+def create_main_object_overlay_grid(grid, fdr_results):
+    """Extract main object voxel coordinates from FDR results"""
+    if 'FDR_floater_mask_3d' not in fdr_results:
         return None, None
     
-    # TODO: Implement actual rendering with floater highlighting
-    # This would require modifying the rendering to separate floaters
-    # For now, return placeholder
-    
-    return None, None
-
-
-def find_best_floater_views(grid, fdr_results, cameras, n_views=3):
-    """
-    Find camera views that best show the floaters
-    
-    Strategy: Find views where floater density is highest
-    
-    Args:
-        grid: SparseGrid instance
-        fdr_results: Results from compute_FDR
-        cameras: List of camera objects
-        n_views: Number of best views to return
-        
-    Returns:
-        best_view_indices: Indices of cameras with most floaters visible
-    """
-    if 'FDR_floater_mask_3d' not in fdr_results or len(cameras) == 0:
-        return []
-    
-    floater_mask, floater_coords = create_floater_overlay_grid(grid, fdr_results)
-    
-    if floater_coords is None or len(floater_coords) == 0:
-        return []
-    
-    # Convert floater coordinates to world space
-    reso = torch.tensor(grid.links.shape)
-    
-    # Simple heuristic: compute distance to camera origins
-    # Views closer to floaters should see them better
-    floater_coords_world = floater_coords.float()
-    
-    # Normalize to [-1, 1] grid coordinates
-    floater_coords_norm = (floater_coords_world / reso.float()) * 2 - 1
-    
-    # Score each camera by proximity to floaters
-    scores = []
-    for i, cam in enumerate(cameras):
-        # Get camera position (simplified - assumes c2w available)
-        if hasattr(cam, 'c2w'):
-            cam_pos = cam.c2w[:3, 3]
-            
-            # Compute mean distance to floaters
-            # (In practice, you'd want to project and check visibility)
-            distances = torch.norm(floater_coords_world - cam_pos.unsqueeze(0), dim=1)
-            score = 1.0 / (distances.mean() + 1e-6)  # Closer = higher score
-            scores.append((i, score.item()))
-    
-    # Sort by score and return top n
-    scores.sort(key=lambda x: x[1], reverse=True)
-    return [idx for idx, _ in scores[:n_views]]
-
-
-def create_floater_density_slice(grid, fdr_results, slice_axis=2, slice_position=0.5):
-    """
-    Create a 2D slice through the 3D floater density field
-    
-    Args:
-        grid: SparseGrid instance
-        fdr_results: Results from compute_FDR
-        slice_axis: Axis to slice along (0=X, 1=Y, 2=Z)
-        slice_position: Position along axis (0-1)
-        
-    Returns:
-        slice_image: 2D visualization of floater density [H, W, 3]
-    """
-    if 'FDR_floater_mask_3d' not in fdr_results:
-        return None
-    
     labeled = fdr_results['FDR_floater_mask_3d']
-    floater_ids = fdr_results['FDR_floater_component_ids']
-    main_id = fdr_results['FDR_main_component_id']
     
-    # Create visualization: main object = gray, floaters = red, empty = black
-    reso = labeled.shape
-    slice_idx = int(reso[slice_axis] * slice_position)
-    
-    # Extract slice
-    if slice_axis == 0:
-        slice_2d = labeled[slice_idx, :, :]
-    elif slice_axis == 1:
-        slice_2d = labeled[:, slice_idx, :]
-    else:  # axis == 2
-        slice_2d = labeled[:, :, slice_idx]
-    
-    # Create RGB visualization
-    vis = np.zeros((*slice_2d.shape, 3), dtype=np.uint8)
-    
-    # Main object = white/gray
-    vis[slice_2d == main_id] = [200, 200, 200]
-    
-    # Floaters = red (intensity based on component size)
-    for fid in floater_ids:
-        mask = slice_2d == fid
-        if mask.any():
-            vis[mask] = [255, 0, 0]
-    
-    return vis
-
-
-def create_floater_comparison_grid(before_slice, after_slice, labels=None):
-    """
-    Create side-by-side comparison of floater visualizations
-    
-    Args:
-        before_slice: Floater visualization before improvements
-        after_slice: Floater visualization after improvements
-        labels: Optional text labels
-        
-    Returns:
-        comparison_image: Side-by-side visualization
-    """
-    if before_slice is None or after_slice is None:
-        return None
-    
-    # Ensure same size
-    h = max(before_slice.shape[0], after_slice.shape[0])
-    w = max(before_slice.shape[1], after_slice.shape[1])
-    
-    before_resized = cv2.resize(before_slice, (w, h))
-    after_resized = cv2.resize(after_slice, (w, h))
-    
-    # Add labels if provided
-    if labels:
-        before_labeled = before_resized.copy()
-        after_labeled = after_resized.copy()
-        cv2.putText(before_labeled, labels[0], (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-        cv2.putText(after_labeled, labels[1], (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-        comparison = np.hstack([before_labeled, after_labeled])
+    if 'FDR_main_component_ids' in fdr_results:
+        main_ids = fdr_results['FDR_main_component_ids']
+    elif 'FDR_main_component_id' in fdr_results:
+        main_ids = [fdr_results['FDR_main_component_id']]
     else:
-        comparison = np.hstack([before_resized, after_resized])
+        return None, None
     
-    return comparison
+    main_mask_3d = np.isin(labeled, main_ids)
+    main_coords = np.stack(np.where(main_mask_3d), axis=-1)
+    
+    return torch.from_numpy(main_mask_3d), torch.from_numpy(main_coords)
 
 
-def project_floaters_to_view(grid, fdr_results, camera, render_size=None):
+# ============================================================================
+# 3D Projection and Overlay
+# ============================================================================
+
+
+def project_floaters_to_view(grid, fdr_results, camera, render_size=None, 
+                              filter_occluded=True, min_density=0.1):
     """
-    Project 3D floater positions onto a 2D camera view
+    Project 3D floater positions onto a 2D camera view with visibility filtering
+    
+    This function now filters floaters to only show VISIBLE artifacts:
+    1. Density filtering: Removes imperceptible low-density floaters (< min_density)
+    2. Occlusion filtering: Removes floaters behind rendered geometry
+    3. Result: Only shows floaters that actually contribute to visible artifacts
     
     Args:
         grid: SparseGrid instance
         fdr_results: Results from compute_FDR with floater mask
         camera: Camera object for projection
         render_size: Optional (H, W) for output size
+        filter_occluded: If True, filter floaters behind rendered geometry (default: True)
+        min_density: Minimum density threshold for visible floaters (default: 0.1)
         
     Returns:
         floater_heatmap: 2D heatmap of floater projections [H, W]
@@ -223,6 +87,32 @@ def project_floaters_to_view(grid, fdr_results, camera, render_size=None):
     
     # Get device from grid
     device = grid.links.device
+    
+    # Filter by density threshold to remove imperceptible floaters
+    if min_density > 0:
+        # Get density values for floater voxels
+        floater_densities = []
+        for coord in floater_coords:
+            i, j, k = int(coord[0]), int(coord[1]), int(coord[2])
+            link_idx = grid.links[i, j, k].item()
+            if link_idx >= 0:
+                density = grid.density_data[link_idx].item()
+                floater_densities.append(density)
+            else:
+                floater_densities.append(0.0)
+        
+        floater_densities = torch.tensor(floater_densities, device=device)
+        density_mask = floater_densities >= min_density
+        
+        # Filter out low-density floaters
+        floater_coords = floater_coords[density_mask.cpu()]
+        
+        if len(floater_coords) == 0:
+            # No visible floaters after density filtering
+            H, W = camera.height, camera.width
+            if render_size is not None:
+                H, W = render_size
+            return np.zeros((H, W), dtype=np.float32)
     
     # Get grid parameters (ensure on correct device)
     reso = torch.tensor(grid.links.shape, device=device)
@@ -278,6 +168,7 @@ def project_floaters_to_view(grid, fdr_results, camera, render_size=None):
     
     x_img_valid = x_img[valid].long()
     y_img_valid = y_img[valid].long()
+    z_depth_valid = z_depth[valid]
     
     # Create heatmap (on CPU for final output)
     H, W = camera.height, camera.width
@@ -286,30 +177,68 @@ def project_floaters_to_view(grid, fdr_results, camera, render_size=None):
     
     heatmap = torch.zeros(H, W, dtype=torch.float32)
     
-    # Move image coordinates back to CPU for heatmap creation
+    # Filter occluded floaters by comparing with rendered depth
+    if filter_occluded and len(x_img_valid) > 0:
+        try:
+            # Render depth map from this camera view
+            depth_map = grid.volume_render_depth_image(camera, sigma_thresh=0.0)
+            depth_map = depth_map.to(device)
+            
+            # Sample depth at floater pixel locations
+            scene_depths = []
+            visibility_mask = []
+            
+            for i, (x, y, floater_depth) in enumerate(zip(x_img_valid, y_img_valid, z_depth_valid)):
+                if 0 <= y < H and 0 <= x < W:
+                    scene_depth = depth_map[y, x].item()
+                    # Floater is visible if it's in front of (or near) the rendered surface
+                    # Add small epsilon to handle numerical precision
+                    is_visible = (floater_depth < scene_depth + 0.05) or (scene_depth < 0.01)
+                    visibility_mask.append(is_visible)
+                else:
+                    visibility_mask.append(False)
+            
+            visibility_mask = torch.tensor(visibility_mask, device=device)
+            x_img_valid = x_img_valid[visibility_mask]
+            y_img_valid = y_img_valid[visibility_mask]
+            z_depth_valid = z_depth_valid[visibility_mask]
+            
+            print(f"  Floater visibility: {visibility_mask.sum().item()}/{len(visibility_mask)} visible after occlusion filtering")
+        except Exception as e:
+            print(f"  Warning: Could not filter occluded floaters: {e}")
+    
+    # Move to CPU for heatmap creation
     x_img_valid = x_img_valid.cpu()
     y_img_valid = y_img_valid.cpu()
+    z_depth_valid = z_depth_valid.cpu().numpy()
     
     if len(x_img_valid) > 0:
-        # Accumulate floater projections
-        for x, y in zip(x_img_valid, y_img_valid):
+        # Accumulate floater projections with depth
+        for x, y, depth in zip(x_img_valid, y_img_valid, z_depth_valid):
             if 0 <= y < H and 0 <= x < W:
                 heatmap[y, x] += 1
     
     heatmap_np = heatmap.numpy()
     
-    # No dilation - pixel-perfect floater locations
+    # Dilate to represent voxel volume (not just centers)
+    # Each floater voxel affects nearby pixels during rendering
+    if heatmap_np.max() > 0:
+        import cv2
+        kernel_size = 3  # Adjust based on voxel size relative to image resolution
+        kernel = np.ones((kernel_size, kernel_size), np.float32)
+        heatmap_np = cv2.dilate(heatmap_np, kernel, iterations=1)
+    
     return heatmap_np
 
 
-def create_floater_overlay_on_render(rgb_image, floater_heatmap, alpha=0.8):
+def create_floater_overlay_on_render(rgb_image, floater_heatmap, alpha=0.9):
     """
-    Overlay floater heatmap onto rendered RGB image with transparent background
+    Overlay floater heatmap onto rendered RGB image with improved visibility
     
     Args:
         rgb_image: Rendered RGB image [H, W, 3] in range [0, 1]
         floater_heatmap: 2D heatmap of floater projections [H, W]
-        alpha: Opacity of floater highlights (default 0.8 for bright red)
+        alpha: Opacity of floater highlights (default 0.9 for high visibility)
         
     Returns:
         overlay_image: RGB image with floater overlay [H, W, 3]
@@ -323,22 +252,329 @@ def create_floater_overlay_on_render(rgb_image, floater_heatmap, alpha=0.8):
     else:
         return rgb_image
     
-    # Make background much more transparent (dim to 30% opacity where no floaters)
-    background_opacity = 0.3
+    # Create binary mask for floater regions
     floater_mask = heatmap_norm > 0
     
-    # Start with dimmed background
-    result = rgb_image * background_opacity
+    # Keep original image brightness, just add red tint to floaters
+    result = rgb_image.copy()
     
-    # Where there are floaters, blend in bright red
-    red_overlay = np.zeros_like(rgb_image)
-    red_overlay[:, :, 0] = heatmap_norm  # Bright red channel
+    # Add pure red overlay to floater regions (consistent with all views)
+    floater_color = np.array([1.0, 0.0, 0.0])  # Pure red
     
-    # Blend: dim background everywhere, bright red where floaters exist
-    result = result * (1 - alpha * heatmap_norm[:, :, np.newaxis]) + \
-             red_overlay * alpha + \
-             rgb_image * (1 - background_opacity) * (1 - floater_mask[:, :, np.newaxis])
+    # Blend floater color with original image
+    for c in range(3):
+        result[:, :, c] = np.where(
+            floater_mask,
+            (1 - alpha) * rgb_image[:, :, c] + alpha * floater_color[c] * heatmap_norm,
+            rgb_image[:, :, c]
+        )
     
+    # Add subtle bright borders around floater regions for better visibility
+    import cv2
+    floater_mask_uint8 = (floater_mask * 255).astype(np.uint8)
+    # Find edges
+    edges = cv2.Canny(floater_mask_uint8, 50, 150)
+    edges_dilated = cv2.dilate(edges, np.ones((2, 2), np.uint8), iterations=1)
+    edge_mask = edges_dilated > 0
+    
+    # Add bright red border (consistent with floater color)
+    border_color = np.array([1.0, 0.0, 0.0])  # Pure red
+    for c in range(3):
+        result[:, :, c] = np.where(edge_mask, border_color[c], result[:, :, c])
+    
+    result = np.clip(result, 0, 1)
+    
+    return result
+
+
+def create_multi_object_voxel_overlay(rgb_image, grid, fdr_results, camera,
+                                       max_points_per_object=50000, alpha=0.7,
+                                       show_floaters=True, min_viz_size=5000):
+    """
+    Overlay ALL objects (main + floaters) onto rendered image with different colors
+    
+    Each main object gets a unique color, floaters are red. This clearly shows:
+    - Which voxels belong to the scene (colored by object)
+    - Spatial gaps between objects  
+    - Which voxels are floaters (red)
+    
+    Args:
+        rgb_image: Rendered RGB image [H, W, 3] in range [0, 1]
+        grid: SparseGrid instance
+        fdr_results: Results from compute_FDR
+        camera: Camera object
+        max_points_per_object: Max voxels to show per object (for performance)
+        alpha: Opacity of voxel markers (default 0.7)
+        show_floaters: If True, also show floaters in red
+        min_viz_size: Minimum voxel count to visualize an object (filters tiny components from view)
+        
+    Returns:
+        overlay_image: RGB image with all objects overlaid [H, W, 3]
+    """
+    if rgb_image is None or fdr_results is None:
+        return rgb_image
+    
+    if 'FDR_floater_mask_3d' not in fdr_results:
+        return rgb_image
+    
+    labeled = fdr_results['FDR_floater_mask_3d']
+    
+    # Get main object IDs
+    if 'FDR_main_component_ids' in fdr_results:
+        main_ids = fdr_results['FDR_main_component_ids']
+    elif 'FDR_main_component_id' in fdr_results:
+        main_ids = [fdr_results['FDR_main_component_id']]
+    else:
+        return rgb_image
+    
+    # Get floater IDs
+    floater_ids = fdr_results.get('FDR_floater_component_ids', [])
+    
+    # Define colors for each main object - 12 distinct colors
+    object_colors = [
+        [0, 255, 0],        # 1. Green
+        [0, 150, 255],      # 2. Blue
+        [255, 200, 0],      # 3. Yellow/Gold
+        [255, 0, 255],      # 4. Magenta
+        [0, 255, 255],      # 5. Cyan
+        [255, 128, 0],      # 6. Orange
+        [128, 0, 255],      # 7. Purple
+        [255, 255, 128],    # 8. Light Yellow
+        [255, 128, 255],    # 9. Pink
+        [128, 255, 0],      # 10. Lime Green
+        [0, 255, 128],      # 11. Spring Green
+        [128, 128, 255],    # 12. Light Blue
+    ]
+    
+    device = grid.links.device
+    reso = torch.tensor(grid.links.shape, device=device)
+    radius = grid.radius.to(device) if hasattr(grid.radius, 'to') else grid.radius
+    center = grid.center.to(device) if hasattr(grid.center, 'to') else grid.center
+    
+    # Project camera matrices
+    c2w = camera.c2w.to(device) if hasattr(camera.c2w, 'to') else camera.c2w
+    w2c = torch.inverse(c2w)
+    
+    fx = float(camera.fx) if hasattr(camera.fx, 'item') else camera.fx
+    fy = float(camera.fy) if camera.fy is not None else fx
+    cx = camera.width * 0.5
+    cy = camera.height * 0.5
+    
+    H, W = camera.height, camera.width
+    
+    # Create overlay with depth buffer for proper occlusion
+    vis_image = (rgb_image * 255).astype(np.uint8)
+    depth_buffer = np.full((H, W), np.inf, dtype=np.float32)  # Initialize with infinity
+    color_buffer = np.zeros((H, W, 3), dtype=np.uint8)  # RGB color at each pixel
+    
+    # Simple filtering: show all main objects that pass the min_viz_size threshold
+    # No complex compactness checks - if FDR says it's a main object, visualize it
+    filtered_main_ids = []
+    for main_id in main_ids:
+        obj_mask = (labeled == main_id)
+        obj_size = np.sum(obj_mask)
+        
+        # Simple size filter
+        if obj_size >= min_viz_size:
+            filtered_main_ids.append(main_id)
+    
+    # Collect all points with their depths and colors first
+    all_points = []  # List of (x, y, depth, color_bgr)
+    
+    # Process each main object with different color
+    for obj_idx, main_id in enumerate(filtered_main_ids):
+        # Get voxels for this object
+        obj_mask = (labeled == main_id)
+        obj_coords = np.stack(np.where(obj_mask), axis=-1)
+        
+        if len(obj_coords) == 0:
+            continue
+        
+        # Subsample if needed
+        if len(obj_coords) > max_points_per_object:
+            indices = np.random.choice(len(obj_coords), max_points_per_object, replace=False)
+            obj_coords = obj_coords[indices]
+        
+        # Convert to world space and project
+        obj_coords_tensor = torch.from_numpy(obj_coords).float().to(device)
+        obj_coords_norm = (obj_coords_tensor / reso.float()) * 2 - 1
+        obj_coords_world = obj_coords_norm * radius.unsqueeze(0) + center.unsqueeze(0)
+        
+        obj_coords_homo = torch.cat([
+            obj_coords_world,
+            torch.ones(len(obj_coords_world), 1, device=device)
+        ], dim=1)
+        
+        obj_cam = (w2c @ obj_coords_homo.T).T
+        
+        x_img = (obj_cam[:, 0] / obj_cam[:, 2]) * fx + cx
+        y_img = (obj_cam[:, 1] / obj_cam[:, 2]) * fy + cy
+        z_depth = obj_cam[:, 2]
+        
+        valid = (z_depth > 0) & (x_img >= 0) & (x_img < W) & (y_img >= 0) & (y_img < H)
+        
+        x_valid = x_img[valid].long().cpu().numpy()
+        y_valid = y_img[valid].long().cpu().numpy()
+        z_valid = z_depth[valid].cpu().numpy()
+        
+        # Get color for this object (BGR for OpenCV)
+        color_rgb = object_colors[obj_idx % len(object_colors)]
+        color_bgr = (int(color_rgb[2]), int(color_rgb[1]), int(color_rgb[0]))
+        
+        # Add points to list
+        for x, y, z in zip(x_valid, y_valid, z_valid):
+            if 0 <= x < W and 0 <= y < H:
+                all_points.append((int(x), int(y), float(z), color_bgr))
+    
+    # Optionally show floaters in red
+    if show_floaters and len(floater_ids) > 0:
+        floater_mask = np.isin(labeled, floater_ids)
+        floater_coords = np.stack(np.where(floater_mask), axis=-1)
+        
+        if len(floater_coords) > 0:
+            # Subsample floaters
+            max_floater_points = max_points_per_object
+            if len(floater_coords) > max_floater_points:
+                indices = np.random.choice(len(floater_coords), max_floater_points, replace=False)
+                floater_coords = floater_coords[indices]
+            
+            # Project floaters
+            floater_coords_tensor = torch.from_numpy(floater_coords).float().to(device)
+            floater_coords_norm = (floater_coords_tensor / reso.float()) * 2 - 1
+            floater_coords_world = floater_coords_norm * radius.unsqueeze(0) + center.unsqueeze(0)
+            
+            floater_coords_homo = torch.cat([
+                floater_coords_world,
+                torch.ones(len(floater_coords_world), 1, device=device)
+            ], dim=1)
+            
+            floater_cam = (w2c @ floater_coords_homo.T).T
+            
+            x_img = (floater_cam[:, 0] / floater_cam[:, 2]) * fx + cx
+            y_img = (floater_cam[:, 1] / floater_cam[:, 2]) * fy + cy
+            z_depth = floater_cam[:, 2]
+            
+            valid = (z_depth > 0) & (x_img >= 0) & (x_img < W) & (y_img >= 0) & (y_img < H)
+            
+            x_valid = x_img[valid].long().cpu().numpy()
+            y_valid = y_img[valid].long().cpu().numpy()
+            z_valid = z_depth[valid].cpu().numpy()
+            
+            # Add floaters to points list (red color in BGR)
+            for x, y, z in zip(x_valid, y_valid, z_valid):
+                if 0 <= x < W and 0 <= y < H:
+                    all_points.append((int(x), int(y), float(z), (0, 0, 255)))  # Red in BGR
+    
+    # Now render all points using depth buffer (back-to-front for proper occlusion)
+    # Sort by depth (farthest first)
+    all_points.sort(key=lambda p: -p[2])  # Negative for descending order
+    
+    # Render each point with depth test
+    for x, y, depth, color_bgr in all_points:
+        # Only draw if this is the closest point at this pixel
+        if depth < depth_buffer[y, x]:
+            depth_buffer[y, x] = depth
+            cv2.circle(vis_image, (x, y), 2, color_bgr, -1)
+    
+    # Blend with original
+    vis_image_float = vis_image.astype(np.float32) / 255.0
+    result = (1 - alpha) * rgb_image + alpha * vis_image_float
+    result = np.clip(result, 0, 1)
+    
+    return result
+
+
+def create_main_object_voxel_overlay(rgb_image, grid, fdr_results, camera, 
+                                      max_points=50000, alpha=0.7):
+    """
+    Overlay main object voxels onto rendered image to show spatial distribution
+    
+    Shows green dots for each main object voxel, allowing visual verification
+    of which voxels belong to the largest connected component.
+    
+    Args:
+        rgb_image: Rendered RGB image [H, W, 3] in range [0, 1]
+        grid: SparseGrid instance
+        fdr_results: Results from compute_FDR
+        camera: Camera object
+        max_points: Maximum number of voxels to visualize (for performance)
+        alpha: Opacity of voxel markers (default 0.7)
+        
+    Returns:
+        overlay_image: RGB image with main object voxels overlaid [H, W, 3]
+    """
+    if rgb_image is None or fdr_results is None:
+        return rgb_image
+    
+    # Get main object voxels
+    main_mask, main_coords = create_main_object_overlay_grid(grid, fdr_results)
+    
+    if main_coords is None or len(main_coords) == 0:
+        return rgb_image
+    
+    # Subsample if too many voxels
+    if len(main_coords) > max_points:
+        indices = np.random.choice(len(main_coords), max_points, replace=False)
+        main_coords = main_coords[indices]
+        print(f"  Subsampled main object voxels: {max_points}/{len(main_mask.nonzero()[0])} for visualization")
+    
+    # Project main object to 2D
+    device = grid.links.device
+    reso = torch.tensor(grid.links.shape, device=device)
+    radius = grid.radius.to(device) if hasattr(grid.radius, 'to') else grid.radius
+    center = grid.center.to(device) if hasattr(grid.center, 'to') else grid.center
+    
+    # Convert to world space
+    main_coords_norm = (main_coords.float().to(device) / reso.float()) * 2 - 1
+    main_coords_world = main_coords_norm * radius.unsqueeze(0) + center.unsqueeze(0)
+    
+    # Project to camera
+    c2w = camera.c2w.to(device) if hasattr(camera.c2w, 'to') else camera.c2w
+    w2c = torch.inverse(c2w)
+    
+    main_coords_homo = torch.cat([
+        main_coords_world,
+        torch.ones(len(main_coords_world), 1, device=device)
+    ], dim=1)
+    
+    main_cam = (w2c @ main_coords_homo.T).T
+    
+    # Project to image
+    fx = float(camera.fx) if hasattr(camera.fx, 'item') else camera.fx
+    fy = float(camera.fy) if camera.fy is not None else fx
+    cx = camera.width * 0.5
+    cy = camera.height * 0.5
+    
+    x_img = (main_cam[:, 0] / main_cam[:, 2]) * fx + cx
+    y_img = (main_cam[:, 1] / main_cam[:, 2]) * fy + cy
+    z_depth = main_cam[:, 2]
+    
+    # Filter valid points (in front of camera and within image bounds)
+    valid = (z_depth > 0) & (x_img >= 0) & (x_img < camera.width) & \
+            (y_img >= 0) & (y_img < camera.height)
+    
+    x_valid = x_img[valid].long().cpu().numpy()
+    y_valid = y_img[valid].long().cpu().numpy()
+    
+    H, W = camera.height, camera.width
+    
+    # Create overlay with green dots for main object voxels
+    result = rgb_image.copy()
+    voxel_color = np.array([0.0, 1.0, 0.3])  # Bright green
+    
+    # Draw small circles/dots for each voxel
+    vis_image = (result * 255).astype(np.uint8)
+    
+    for x, y in zip(x_valid, y_valid):
+        if 0 <= x < W and 0 <= y < H:
+            # Draw a small filled circle (2 pixel radius)
+            cv2.circle(vis_image, (int(x), int(y)), 2, 
+                      (int(voxel_color[2]*255), int(voxel_color[1]*255), int(voxel_color[0]*255)), 
+                      -1)  # -1 = filled
+    
+    # Blend with original image
+    vis_image_float = vis_image.astype(np.float32) / 255.0
+    result = (1 - alpha) * rgb_image + alpha * vis_image_float
     result = np.clip(result, 0, 1)
     
     return result
@@ -396,332 +632,36 @@ def render_density_from_camera(grid, camera, colormap='viridis'):
             return None
 
 
-def visualize_grid_structure(grid, camera, base_image=None, render_size=None, max_points=None, chunk_subdivisions=8, background_opacity=0.75, mode='boundary'):
-    """
-    Visualize the sparse grid structure by showing active regions
-    
-    Shows:
-    - Overall grid bounding box (white, thick)
-    - Active chunk boxes (cyan) - subdivisions of the grid that contain active voxels
-    - Active voxel centers (green dots) - ALL active voxels from sparse grid
-    
-    This gives an exact 1:1 visualization of the sparse grid structure.
-    Every voxel with grid.links[i,j,k] >= 0 is rendered.
-    
-    Args:
-        grid: SparseGrid instance
-        camera: Camera object with c2w, intrinsics, etc.
-        base_image: Optional base image to overlay on [H, W, 3], if None uses black background
-        render_size: Optional (H, W) tuple for output size (only used if base_image is None)
-        max_points: Maximum number of voxel centers to show as dots (None = show all)
-        chunk_subdivisions: Number of subdivisions per axis (e.g., 8 means 8x8x8=512 chunks)
-        background_opacity: Opacity of background image (0.0-1.0), lower = more dimmed
-        mode: 'boundary' (clean shell) or 'all' (show all chunk boxes)
-        
-    Returns:
-        RGB image with grid structure overlay [H, W, 3]
-    """
-    if base_image is not None:
-        # Apply opacity to background for better grid visibility
-        vis_image = (base_image * 255 * background_opacity).astype(np.uint8).copy()
-        H, W = vis_image.shape[:2]
-    else:
-        if render_size is None:
-            render_size = (800, 800)
-        H, W = render_size
-        vis_image = np.zeros((H, W, 3), dtype=np.uint8)
-    
-    device = grid.sh_data.device
-    
-    # Helper function to project 3D point to 2D
-    def project_point(world_pt, c2w, fx, fy, cx, cy):
-        """Project a 3D world point to 2D image coordinates"""
-        w2c = torch.inverse(c2w)
-        world_pt_h = torch.cat([world_pt, torch.ones(1, device=device)])
-        cam_pt = w2c @ world_pt_h
-        
-        if cam_pt[2] <= 0:  # Behind camera
-            return None
-            
-        x = (cam_pt[0] / cam_pt[2]) * fx + cx
-        y = (cam_pt[1] / cam_pt[2]) * fy + cy
-        
-        return (int(x.item()), int(y.item()))
-    
-    # Get camera parameters
-    c2w = camera.c2w.to(device)
-    fx = float(camera.fx) if hasattr(camera, 'fx') else float(camera.intrins[0, 0])
-    fy = float(camera.fy) if hasattr(camera, 'fy') else float(camera.intrins[1, 1])
-    cx = float(camera.cx) if hasattr(camera, 'cx') else float(camera.intrins[0, 2])
-    cy = float(camera.cy) if hasattr(camera, 'cy') else float(camera.intrins[1, 2])
-    
-    # 1. Draw overall grid bounding box (8 corners, 12 edges)
-    grid_center = grid.center.to(device)
-    grid_radius = grid.radius.to(device)
-    
-    # 8 corners of the bounding box
-    corners_offset = torch.tensor([
-        [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],  # Bottom face
-        [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]       # Top face
-    ], device=device, dtype=torch.float32)
-    
-    corners_world = corners_offset * grid_radius + grid_center
-    
-    # Project corners
-    corners_2d = []
-    for corner in corners_world:
-        pt_2d = project_point(corner, c2w, fx, fy, cx, cy)
-        corners_2d.append(pt_2d)
-    
-    # Draw edges of bounding box (cyan color)
-    edges = [
-        (0, 1), (1, 2), (2, 3), (3, 0),  # Bottom face
-        (4, 5), (5, 6), (6, 7), (7, 4),  # Top face
-        (0, 4), (1, 5), (2, 6), (3, 7)   # Vertical edges
-    ]
-    
-    for i, j in edges:
-        if corners_2d[i] is not None and corners_2d[j] is not None:
-            pt1, pt2 = corners_2d[i], corners_2d[j]
-            if 0 <= pt1[0] < W*2 and 0 <= pt1[1] < H*2 and 0 <= pt2[0] < W*2 and 0 <= pt2[1] < H*2:
-                cv2.line(vis_image, pt1, pt2, (255, 255, 255), 3)  # White, thick
-    
-    # 2. Subdivide grid into chunks and draw boxes for active chunks (octree-like visualization)
-    reso = torch.tensor(grid.links.shape, device=device, dtype=torch.float32)
-    chunk_size = (reso / chunk_subdivisions).int()
-    
-    active_mask = grid.links >= 0
-    
-    if mode == 'all':
-        # Mode 1: Draw ALL active chunk boxes (shows overlaps, more detailed)
-        # Also compute chunk density for color coding
-        for i in range(chunk_subdivisions):
-            for j in range(chunk_subdivisions):
-                for k in range(chunk_subdivisions):
-                    start_i = i * chunk_size[0]
-                    start_j = j * chunk_size[1]
-                    start_k = k * chunk_size[2]
-                    end_i = min((i + 1) * chunk_size[0], int(reso[0]))
-                    end_j = min((j + 1) * chunk_size[1], int(reso[1]))
-                    end_k = min((k + 1) * chunk_size[2], int(reso[2]))
-                    
-                    chunk_region = active_mask[start_i:end_i, start_j:end_j, start_k:end_k]
-                    num_active = chunk_region.sum().item()
-                    chunk_volume = chunk_region.numel()
-                    
-                    if num_active > 0:
-                        # Compute density: percentage of voxels that are active
-                        density = num_active / chunk_volume
-                        chunk_min = torch.tensor([i, j, k], device=device, dtype=torch.float32)
-                        chunk_max = torch.tensor([i+1, j+1, k+1], device=device, dtype=torch.float32)
-                        
-                        chunk_min_norm = (chunk_min / chunk_subdivisions) * 2 - 1
-                        chunk_max_norm = (chunk_max / chunk_subdivisions) * 2 - 1
-                        
-                        chunk_corners = torch.tensor([
-                            [chunk_min_norm[0], chunk_min_norm[1], chunk_min_norm[2]],
-                            [chunk_max_norm[0], chunk_min_norm[1], chunk_min_norm[2]],
-                            [chunk_max_norm[0], chunk_max_norm[1], chunk_min_norm[2]],
-                            [chunk_min_norm[0], chunk_max_norm[1], chunk_min_norm[2]],
-                            [chunk_min_norm[0], chunk_min_norm[1], chunk_max_norm[2]],
-                            [chunk_max_norm[0], chunk_min_norm[1], chunk_max_norm[2]],
-                            [chunk_max_norm[0], chunk_max_norm[1], chunk_max_norm[2]],
-                            [chunk_min_norm[0], chunk_max_norm[1], chunk_max_norm[2]]
-                        ], device=device, dtype=torch.float32)
-                        
-                        chunk_corners_world = chunk_corners * grid_radius + grid_center
-                        
-                        chunk_corners_2d = []
-                        for corner in chunk_corners_world:
-                            pt_2d = project_point(corner, c2w, fx, fy, cx, cy)
-                            chunk_corners_2d.append(pt_2d)
-                        
-                        # Draw all 12 edges
-                        for edge_i, edge_j in edges:
-                            if chunk_corners_2d[edge_i] is not None and chunk_corners_2d[edge_j] is not None:
-                                pt1, pt2 = chunk_corners_2d[edge_i], chunk_corners_2d[edge_j]
-                                if 0 <= pt1[0] < W*2 and 0 <= pt1[1] < H*2 and 0 <= pt2[0] < W*2 and 0 <= pt2[1] < H*2:
-                                    cv2.line(vis_image, pt1, pt2, (0, 255, 255), 1)  # Cyan
-    
-    else:  # mode == 'boundary'
-        # Mode 2: Draw ONLY boundary edges (clean shell, no overlaps)
-        # Create a 3D grid indicating which chunks are active
-        chunk_grid = torch.zeros((chunk_subdivisions, chunk_subdivisions, chunk_subdivisions), dtype=torch.bool, device=device)
-        
-        for i in range(chunk_subdivisions):
-            for j in range(chunk_subdivisions):
-                for k in range(chunk_subdivisions):
-                    start_i = i * chunk_size[0]
-                    start_j = j * chunk_size[1]
-                    start_k = k * chunk_size[2]
-                    end_i = min((i + 1) * chunk_size[0], int(reso[0]))
-                    end_j = min((j + 1) * chunk_size[1], int(reso[1]))
-                    end_k = min((k + 1) * chunk_size[2], int(reso[2]))
-                    
-                    chunk_grid[i, j, k] = active_mask[start_i:end_i, start_j:end_j, start_k:end_k].any()
-        
-        # Draw only boundary edges (where active meets inactive or boundary)
-        for i in range(chunk_subdivisions):
-            for j in range(chunk_subdivisions):
-                for k in range(chunk_subdivisions):
-                    if not chunk_grid[i, j, k]:
-                        continue  # Skip inactive chunks
-                    
-                    # Get chunk bounds in normalized coords
-                    chunk_min = torch.tensor([i, j, k], device=device, dtype=torch.float32)
-                    chunk_max = torch.tensor([i+1, j+1, k+1], device=device, dtype=torch.float32)
-                    
-                    chunk_min_norm = (chunk_min / chunk_subdivisions) * 2 - 1
-                    chunk_max_norm = (chunk_max / chunk_subdivisions) * 2 - 1
-                    
-                    # Define 6 faces and check neighbors
-                    faces = [
-                        # (face_corners, neighbor_offset, face_name)
-                        ([0, 1, 2, 3], (-1, 0, 0), 'x_min'),  # Left face
-                        ([4, 5, 6, 7], (1, 0, 0), 'x_max'),   # Right face
-                        ([0, 1, 5, 4], (0, -1, 0), 'y_min'),  # Front face
-                        ([2, 3, 7, 6], (0, 1, 0), 'y_max'),   # Back face
-                        ([0, 3, 7, 4], (0, 0, -1), 'z_min'),  # Bottom face
-                        ([1, 2, 6, 5], (0, 0, 1), 'z_max'),   # Top face
-                    ]
-                    
-                    # Get 8 corners of this chunk
-                    chunk_corners = torch.tensor([
-                        [chunk_min_norm[0], chunk_min_norm[1], chunk_min_norm[2]],
-                        [chunk_max_norm[0], chunk_min_norm[1], chunk_min_norm[2]],
-                        [chunk_max_norm[0], chunk_max_norm[1], chunk_min_norm[2]],
-                        [chunk_min_norm[0], chunk_max_norm[1], chunk_min_norm[2]],
-                        [chunk_min_norm[0], chunk_min_norm[1], chunk_max_norm[2]],
-                        [chunk_max_norm[0], chunk_min_norm[1], chunk_max_norm[2]],
-                        [chunk_max_norm[0], chunk_max_norm[1], chunk_max_norm[2]],
-                        [chunk_min_norm[0], chunk_max_norm[1], chunk_max_norm[2]]
-                    ], device=device, dtype=torch.float32)
-                    
-                    chunk_corners_world = chunk_corners * grid_radius + grid_center
-                    
-                    # Project all corners once
-                    chunk_corners_2d = []
-                    for corner in chunk_corners_world:
-                        pt_2d = project_point(corner, c2w, fx, fy, cx, cy)
-                        chunk_corners_2d.append(pt_2d)
-                    
-                    # Draw edges for faces that are boundaries (neighbor is inactive or out of bounds)
-                    for face_corners, neighbor_offset, _ in faces:
-                        ni, nj, nk = i + neighbor_offset[0], j + neighbor_offset[1], k + neighbor_offset[2]
-                        
-                        # Draw face if neighbor is out of bounds or inactive
-                        is_boundary = (ni < 0 or ni >= chunk_subdivisions or
-                                       nj < 0 or nj >= chunk_subdivisions or
-                                       nk < 0 or nk >= chunk_subdivisions or
-                                       not chunk_grid[ni, nj, nk])
-                        
-                        if is_boundary:
-                            # Draw the 4 edges of this face
-                            face_edges = [
-                                (face_corners[0], face_corners[1]),
-                                (face_corners[1], face_corners[2]),
-                                (face_corners[2], face_corners[3]),
-                                (face_corners[3], face_corners[0])
-                            ]
-                            
-                            for idx1, idx2 in face_edges:
-                                if chunk_corners_2d[idx1] is not None and chunk_corners_2d[idx2] is not None:
-                                    pt1, pt2 = chunk_corners_2d[idx1], chunk_corners_2d[idx2]
-                                    if 0 <= pt1[0] < W*2 and 0 <= pt1[1] < H*2 and 0 <= pt2[0] < W*2 and 0 <= pt2[1] < H*2:
-                                        cv2.line(vis_image, pt1, pt2, (0, 255, 255), 1)  # Cyan
-    
-    # 3. Draw ALL active voxel centers (green dots) - 1:1 accurate to sparse grid
-    # Get indices of ALL active voxels (where grid.links >= 0)
-    active_indices = torch.nonzero(active_mask, as_tuple=False).float()  # [N, 3]
-    
-    total_active = active_indices.shape[0]
-    print(f"  Rendering {total_active:,} active voxels (1:1 with sparse grid)")
-    
-    # Sample if max_points is specified
-    if max_points is not None and total_active > max_points:
-        print(f"  WARNING: Sampling {max_points:,} voxels (set max_points=None for full accuracy)")
-        indices = torch.randperm(total_active)[:max_points]
-        sampled_indices = active_indices[indices]
-    else:
-        sampled_indices = active_indices
-    
-    # Convert voxel indices to world coordinates
-    # IMPORTANT: grid.links uses indices [i, j, k] where each is in [0, reso-1]
-    # The voxel CENTER is at (i+0.5, j+0.5, k+0.5) in voxel space
-    voxel_coords = (sampled_indices + 0.5) / reso  # Normalize to [0, 1], centers at 0.5/reso spacing
-    voxel_coords = voxel_coords * 2 - 1  # Scale to [-1, 1]
-    world_coords = voxel_coords * grid_radius + grid_center
-    
-    # Project to image
-    w2c = torch.inverse(c2w)
-    world_coords_h = torch.cat([world_coords, torch.ones(world_coords.shape[0], 1, device=device)], dim=1)
-    cam_coords = (w2c @ world_coords_h.T).T[:, :3]
-    
-    x = (cam_coords[:, 0] / cam_coords[:, 2]) * fx + cx
-    y = (cam_coords[:, 1] / cam_coords[:, 2]) * fy + cy
-    z = cam_coords[:, 2]
-    
-    valid = (z > 0) & (x >= 0) & (x < W) & (y >= 0) & (y < H)
-    x_valid = x[valid].cpu().numpy()
-    y_valid = y[valid].cpu().numpy()
-    
-    for xi, yi in zip(x_valid, y_valid):
-        xi, yi = int(xi), int(yi)
-        if 0 <= xi < W and 0 <= yi < H:
-            cv2.circle(vis_image, (xi, yi), 1, (0, 255, 0), -1)  # Green
-    
-    return vis_image
-
-
 def log_floater_visualizations_to_tensorboard(
     summary_writer,
     grid,
     fdr_results,
     global_step,
-    n_slices=3,
     cameras=None,
     rendered_images=None,
     gt_images=None,
     max_render_views=3,
-    log_density_renders=False
+    log_density_renders=True,
+    max_voxels_per_object=200000
 ):
     """
-    Log comprehensive floater visualizations to TensorBoard
+    Log floater visualizations to TensorBoard
     
     Args:
         summary_writer: TensorBoard SummaryWriter
         grid: SparseGrid instance
         fdr_results: Results from compute_FDR
         global_step: Training iteration for logging
-        n_slices: Number of slices to visualize per axis
         cameras: Optional list of camera objects for projection overlays
         rendered_images: Optional list of rendered RGB images [H, W, 3]
         gt_images: Optional list of ground truth RGB images [H, W, 3]
         max_render_views: Maximum number of rendered views to overlay
-        log_density_renders: If True, also log density field renders for validation
+        log_density_renders: If True, log density field renders (default: True)
+        max_voxels_per_object: Max voxels to render per object (default: 200000)
     """
     if 'FDR_floater_mask_3d' not in fdr_results:
         print("  Warning: No floater mask available for visualization")
         return
-    
-    # Create slices along different axes
-    for axis, axis_name in enumerate(['X', 'Y', 'Z']):
-        for i, pos in enumerate(np.linspace(0.3, 0.7, n_slices)):
-            slice_vis = create_floater_density_slice(
-                grid, fdr_results,
-                slice_axis=axis,
-                slice_position=pos
-            )
-            
-            if slice_vis is not None:
-                # Convert to format TensorBoard expects [C, H, W]
-                slice_vis_tb = slice_vis.transpose(2, 0, 1)
-                summary_writer.add_image(
-                    f'floaters/slice_{axis_name}_{i}',
-                    slice_vis_tb,
-                    global_step=global_step,
-                    dataformats='CHW'
-                )
     
     # Create floater projection overlays on rendered views
     if cameras is not None and rendered_images is not None:
@@ -732,125 +672,117 @@ def log_floater_visualizations_to_tensorboard(
             rgb_image = rendered_images[i]
             gt_image = gt_images[i] if gt_images is not None and i < len(gt_images) else None
             
-            # Always log GT and render views (these should always work)
             try:
                 if gt_image is not None:
-                    gt_tb = gt_image.transpose(2, 0, 1)  # [C, H, W]
                     summary_writer.add_image(
-                        f'floaters/gt_view_{i}',
-                        gt_tb,
+                        f'floaters/gt_view_{i}', 
+                        gt_image.transpose(2, 0, 1),
                         global_step=global_step,
                         dataformats='CHW'
                     )
                 
-                rgb_tb = rgb_image.transpose(2, 0, 1)  # [C, H, W]
                 summary_writer.add_image(
-                    f'floaters/render_view_{i}',
-                    rgb_tb,
+                    f'floaters/render_view_{i}', 
+                    rgb_image.transpose(2, 0, 1),
                     global_step=global_step,
                     dataformats='CHW'
                 )
                 
-                # Optionally render density field for validation
                 if log_density_renders:
                     density_render = render_density_from_camera(grid, camera, colormap='hot')
                     if density_render is not None:
-                        density_tb = density_render.transpose(2, 0, 1)
                         summary_writer.add_image(
-                            f'floaters/density_view_{i}',
-                            density_tb,
+                            f'floaters/density_view_{i}', 
+                            density_render.transpose(2, 0, 1),
                             global_step=global_step,
                             dataformats='CHW'
                         )
-                
-                # Log grid structure visualization (always) - overlay on rendered image
-                # Mode 1: Boundary only (clean shell) with ALL voxels
-                grid_structure_boundary = visualize_grid_structure(
-                    grid, 
-                    camera,
-                    base_image=rgb_image,  # Overlay on rendered image
-                    max_points=None,  # Render ALL active voxels (1:1 accuracy)
-                    chunk_subdivisions=8,  # Divide grid into 8x8x8 chunks
-                    background_opacity=0.75,  # Dim background for better visibility
-                    mode='boundary'
-                )
-                grid_boundary_normalized = grid_structure_boundary / 255.0
-                grid_boundary_tb = grid_boundary_normalized.transpose(2, 0, 1)
-                summary_writer.add_image(
-                    f'floaters/grid_boundary_view_{i}',
-                    grid_boundary_tb,
-                    global_step=global_step,
-                    dataformats='CHW'
-                )
-                
-                # Mode 2: All boxes (shows every active chunk with overlaps) with ALL voxels
-                grid_structure_all = visualize_grid_structure(
-                    grid, 
-                    camera,
-                    base_image=rgb_image,  # Overlay on rendered image
-                    max_points=None,  # Render ALL active voxels (1:1 accuracy)
-                    chunk_subdivisions=8,  # Divide grid into 8x8x8 chunks
-                    background_opacity=0.75,  # Dim background for better visibility
-                    mode='all'
-                )
-                grid_all_normalized = grid_structure_all / 255.0
-                grid_all_tb = grid_all_normalized.transpose(2, 0, 1)
-                summary_writer.add_image(
-                    f'floaters/grid_all_boxes_view_{i}',
-                    grid_all_tb,
-                    global_step=global_step,
-                    dataformats='CHW'
-                )
             except Exception as e:
                 print(f"  Warning: Failed to log images for view {i}: {e}")
             
-            # Try to project floaters and create overlays
             try:
-                # Debug: Check devices
-                # print(f"  Debug view {i}: grid.links device = {grid.links.device}, camera.c2w device = {camera.c2w.device if hasattr(camera.c2w, 'device') else 'N/A'}")
                 floater_heatmap = project_floaters_to_view(grid, fdr_results, camera)
                 
                 if floater_heatmap is not None:
-                    # Create overlay with enhanced visibility (dimmed background, bright red floaters)
-                    overlay_image = create_floater_overlay_on_render(
-                        rgb_image, floater_heatmap  # Uses default alpha=0.8 for bright highlights
-                    )
-                    
-                    # Log overlay to TensorBoard
-                    overlay_tb = overlay_image.transpose(2, 0, 1)  # [C, H, W]
+                    overlay_image = create_floater_overlay_on_render(rgb_image, floater_heatmap)
                     summary_writer.add_image(
-                        f'floaters/overlay_view_{i}',
-                        overlay_tb,
+                        f'floaters/overlay_view_{i}', 
+                        overlay_image.transpose(2, 0, 1),
                         global_step=global_step,
                         dataformats='CHW'
                     )
                     
-                    # Also log just the heatmap
                     heatmap_colored = cv2.applyColorMap(
                         (floater_heatmap / max(floater_heatmap.max(), 1e-6) * 255).astype(np.uint8),
                         cv2.COLORMAP_JET
                     )
                     heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
-                    heatmap_tb = heatmap_colored.transpose(2, 0, 1)
                     summary_writer.add_image(
                         f'floaters/heatmap_view_{i}',
-                        heatmap_tb,
+                        heatmap_colored.transpose(2, 0, 1),
                         global_step=global_step,
                         dataformats='CHW'
                     )
             except Exception as e:
-                import traceback
                 print(f"  Warning: Failed to create floater overlay for view {i}: {e}")
-                print(f"  Traceback: {traceback.format_exc()}")
+            
+            try:
+                main_voxel_overlay = create_main_object_voxel_overlay(
+                    rgb_image, grid, fdr_results, camera, 
+                    max_points=max_voxels_per_object, alpha=0.7
+                )
+                
+                if main_voxel_overlay is not None:
+                    summary_writer.add_image(
+                        f'floaters/main_object_voxels_view_{i}',
+                        main_voxel_overlay.transpose(2, 0, 1),
+                        global_step=global_step,
+                        dataformats='CHW'
+                    )
+            except Exception as e:
+                print(f"  Warning: Failed to create main object overlay for view {i}: {e}")
+            
+            try:
+                multi_obj_overlay = create_multi_object_voxel_overlay(
+                    rgb_image, grid, fdr_results, camera, 
+                    max_points_per_object=max_voxels_per_object, alpha=0.7, 
+                    show_floaters=True, min_viz_size=500  # Match FDR threshold
+                )
+                
+                if multi_obj_overlay is not None:
+                    summary_writer.add_image(
+                        f'floaters/multi_object_colored_view_{i}',
+                        multi_obj_overlay.transpose(2, 0, 1),
+                        global_step=global_step,
+                        dataformats='CHW'
+                    )
+            except Exception as e:
+                print(f"  Warning: Failed to create multi-object overlay for view {i}: {e}")
     
-    # Log summary text
-    summary_text = f"""
-    FDR: {fdr_results['FDR']:.2%}
-    Num Floaters: {fdr_results['FDR_num_floaters']}
-    Main Volume: {fdr_results['FDR_main_volume']:,} voxels
-    Floater Volume: {fdr_results['FDR_floater_volume']:,} voxels
-    Largest Floater: {fdr_results['FDR_largest_floater']:,} voxels
-    """
+    # Create detailed summary with per-object breakdown
+    main_ids = fdr_results.get('FDR_main_component_ids', [])
+    labeled = fdr_results.get('FDR_floater_mask_3d', None)
+    
+    summary_lines = [
+        f"FDR: {fdr_results['FDR']:.2%}",
+        f"Method: {fdr_results.get('FDR_detection_method', 'unknown')}",
+        f"Main Objects: {fdr_results.get('FDR_num_main_objects', 1)}",
+        f"Floaters: {fdr_results['FDR_num_floaters']}",
+        f"Main Volume: {fdr_results['FDR_main_volume']:,} voxels ({fdr_results['FDR_main_volume']/fdr_results['FDR_total_volume']*100:.1f}%)",
+        f"Floater Volume: {fdr_results['FDR_floater_volume']:,} voxels ({fdr_results['FDR']:.2%})",
+        ""
+    ]
+    
+    # Add per-object size breakdown
+    if labeled is not None and len(main_ids) > 0:
+        summary_lines.append("Main Object Sizes:")
+        from scipy import ndimage
+        for i, main_id in enumerate(main_ids[:8]):  # Top 8 objects
+            obj_size = np.sum(labeled == main_id)
+            percent = (obj_size / fdr_results['FDR_total_volume']) * 100
+            summary_lines.append(f"  Object #{i+1}: {obj_size:,} voxels ({percent:.1f}%)")
+    
+    summary_text = "\n".join(summary_lines)
     
     summary_writer.add_text(
         'floaters/summary',
@@ -858,11 +790,9 @@ def log_floater_visualizations_to_tensorboard(
         global_step=global_step
     )
     
-    n_vis = n_slices * 3
     if cameras is not None and rendered_images is not None:
-        # gt + render + heatmap + overlay = 4 per view (or 3 if no GT)
         n_views = min(len(cameras), len(rendered_images), max_render_views)
-        imgs_per_view = 4 if gt_images is not None else 3
-        n_vis += n_views * imgs_per_view
-    print(f"  Logged {n_vis} floater visualizations to TensorBoard")
+        imgs_per_view = 6 - (0 if gt_images else 1)
+        n_vis = n_views * imgs_per_view
+        print(f"  Logged {n_vis} floater visualizations to TensorBoard")
 
